@@ -92,8 +92,8 @@ class MemoryQAAgent:
     ) -> List[str]:
         """Return the top-k chunk texts for *question*, restricted to *doc_ids*.
 
-        The competition provides a ``doc_ids`` range per question; honouring it
-        keeps retrieval on the intended documents and avoids cross-document
+        When a caller knows which documents a question concerns, passing their
+        ids keeps retrieval on the intended documents and avoids cross-document
         contamination. When ``doc_ids`` is None, all ingested docs are eligible.
         """
         if len(self.store) == 0:
