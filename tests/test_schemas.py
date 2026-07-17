@@ -22,6 +22,18 @@ def test_multi_sorts_and_dedupes():
     assert parse_answer("正确选项是 C、A、A、D", "multi", num_options=4) == "ACD"
 
 
+def test_reasoning_with_acronyms_does_not_corrupt_answer():
+    # Financial acronyms in reasoning must not leak option letters.
+    assert parse_answer("Comparing EBITDA and ROE, the answer is C", "mcq", 4) == "C"
+    assert parse_answer("Given the USD exposure, Answer: A", "mcq", 4) == "A"
+    # multi: only letters after the marker count, not the acronym letters.
+    assert parse_answer("EBITDA rose while ROA fell. 答案 AC", "multi", 4) == "AC"
+
+
+def test_last_line_is_used_when_no_marker():
+    assert parse_answer("Some reasoning about DCF models.\nB", "mcq", 4) == "B"
+
+
 def test_empty_reply_returns_empty_string():
     assert parse_answer("no letters here", "multi", num_options=4) == ""
     assert parse_answer("", "mcq", num_options=4) == ""

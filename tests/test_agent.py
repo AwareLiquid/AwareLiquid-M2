@@ -42,6 +42,18 @@ def test_retrieve_is_restricted_to_doc_ids():
     assert all("天气" not in h for h in hits)
 
 
+def test_doc_id_filter_ranks_within_allowed_set():
+    # Fill the store with many chunks from a distractor doc, so the target doc's
+    # chunk would rank below a global top-k. In-store filtering must still find it.
+    agent = _agent()
+    for i in range(30):
+        agent.ingest_document(f"noise-{i}", "无关内容，讨论天气、旅行与美食的段落。")
+    agent.ingest_document("target", "本公司 2023 年营业收入为 124.5 亿元。")
+    hits = agent.retrieve("营业收入是多少", doc_ids=["target"])
+    assert hits, "target doc chunk must survive filtering even amid many distractors"
+    assert any("124.5" in h for h in hits)
+
+
 def test_answer_question_shape_and_usage():
     agent = _agent()
     agent.ingest_document("annual-2023", REPORT)

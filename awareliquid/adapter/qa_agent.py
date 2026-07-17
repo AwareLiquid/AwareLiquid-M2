@@ -26,21 +26,23 @@ from .schemas import AnswerResult, parse_answer
 
 _SYSTEM_PROMPT = (
     "You are a precise financial document analyst. Answer the multiple-choice "
-    "question using ONLY the provided context. Reason briefly, then reply with "
-    "the option letter(s) only. For single-choice or true/false give exactly one "
-    "letter; for multiple-choice give every correct letter with no separators "
-    "(e.g. ACD). If the context is insufficient, choose the best-supported option."
+    "question using ONLY the provided context. Reply with the option letter(s) "
+    "and NOTHING else -- no words, no reasoning, no punctuation. For single-choice "
+    "or true/false output exactly one letter (e.g. B). For multiple-choice output "
+    "every correct letter with no separators (e.g. ACD). If the context is "
+    "insufficient, output the single best-supported letter."
 )
 
 
 @dataclass
 class RetrievalConfig:
-    max_chars: int = 800
-    overlap_chars: int = 120
+    # max_chars stays at or below the encoder's token window (e5: 512) so a whole
+    # chunk is embedded rather than silently truncated.
+    max_chars: int = 450
+    overlap_chars: int = 80
     top_k: int = 6
-    pool_multiplier: int = 4  # over-retrieve, then filter by allowed doc_ids
     compression_budget: int = 1200
-    max_answer_tokens: int = 32
+    max_answer_tokens: int = 16
 
 
 class MemoryQAAgent:
@@ -87,30 +89,39 @@ class MemoryQAAgent:
         return sum(self.ingest_document(did, txt) for did, txt in docs.items())
 
     # -- retrieve ---------------------------------------------------------
+    @staticmethod
+    def _enrich(question: str, options: Optional[Sequence[str]]) -> str:
+        """Query string used for retrieval AND compression.
+
+        The answer-bearing sentence often shares its wording with an *option*
+        ("net margin fell to 12.4%") rather than the question ("how did
+        profitability change?"), so the option text is folded in as extra terms.
+        """
+        if options:
+            return question + " " + " ".join(str(o) for o in options)
+        return question
+
     def retrieve(
-        self, question: str, doc_ids: Optional[Sequence[str]] = None
+        self,
+        question: str,
+        doc_ids: Optional[Sequence[str]] = None,
+        options: Optional[Sequence[str]] = None,
     ) -> List[str]:
         """Return the top-k chunk texts for *question*, restricted to *doc_ids*.
 
-        When a caller knows which documents a question concerns, passing their
-        ids keeps retrieval on the intended documents and avoids cross-document
-        contamination. When ``doc_ids`` is None, all ingested docs are eligible.
+        The document filter is applied inside the store's scan, so ranking (and
+        centering) happen *within* the allowed set rather than globally then
+        filtered -- which would drop allowed chunks that rank below the global
+        top-k. When ``doc_ids`` is None, all ingested docs are eligible.
         """
         if len(self.store) == 0:
             return []
-        allowed = {str(d) for d in doc_ids} if doc_ids else None
-        q_key = self.encoder.encode(question, is_query=True)
-        # Over-retrieve so post-filtering by doc_id still yields top_k survivors.
-        pool = self.config.top_k * (self.config.pool_multiplier if allowed else 1)
-        hits = self.store.query(q_key, top_k=min(pool, len(self.store)), center=True)
-        texts: List[str] = []
-        for content, _score, meta in hits:
-            if allowed is not None and str((meta or {}).get("doc_id")) not in allowed:
-                continue
-            texts.append(str(content))
-            if len(texts) >= self.config.top_k:
-                break
-        return texts
+        allowed = [str(d) for d in doc_ids] if doc_ids else None
+        q_key = self.encoder.encode(self._enrich(question, options), is_query=True)
+        hits = self.store.query(
+            q_key, top_k=self.config.top_k, center=True, doc_ids=allowed
+        )
+        return [str(content) for content, _score, _meta in hits]
 
     # -- answer -----------------------------------------------------------
     def answer_question(
@@ -122,8 +133,10 @@ class MemoryQAAgent:
         doc_ids: Optional[Sequence[str]] = None,
     ) -> AnswerResult:
         """Answer one question and report the tokens it cost."""
-        passages = self.retrieve(question, doc_ids=doc_ids)
-        compressed = self.compressor.compress(question, passages)
+        passages = self.retrieve(question, doc_ids=doc_ids, options=options)
+        # Compress against question + options so an answer sentence matching a
+        # distractor's wording is retained, not dropped.
+        compressed = self.compressor.compress(self._enrich(question, options), passages)
         user_prompt = self._build_prompt(question, options, qtype, compressed.text)
         result: ChatResult = self.chat_client.chat(
             messages=[

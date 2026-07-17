@@ -85,9 +85,14 @@ class SentenceEncoder:
         pooling: Optional[str] = None,
         query_instruction: Optional[str] = None,
         passage_instruction: Optional[str] = None,
+        max_length: int = 512,
     ):
         self.model_id = model_id
         self.device = device
+        # Truncation window for a single passage. Must cover the chunk size or the
+        # tail of a long chunk never influences its key -- e5 supports up to 512
+        # tokens, so keep chunks at or below this to embed the whole passage.
+        self.max_length = int(max_length)
         rec = _recipe_for(model_id)
         self.pooling = (pooling or rec["pooling"]).lower()
         self.query_instruction = (
@@ -115,7 +120,7 @@ class SentenceEncoder:
         self._ensure_loaded()
         prefix = self.query_instruction if is_query else self.passage_instruction
         enc = self._tok(prefix + (text or " "), return_tensors="pt",
-                        truncation=True, max_length=256, padding=True).to(self.device)
+                        truncation=True, max_length=self.max_length, padding=True).to(self.device)
         out = self._model(**enc)
         if self.pooling == "cls":
             vec = out.last_hidden_state[:, 0]                       # (1, d)

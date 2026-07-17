@@ -46,6 +46,20 @@ def parse_answer(raw: str, qtype: str, num_options: int = 4) -> str:
         raise ValueError(f"unknown qtype {qtype!r}, expected one of {VALID_TYPES}")
 
     text = raw or ""
+    # Defence in depth (the prompt already asks for letters only): if the model
+    # still prefixes reasoning, narrow to the span after an explicit answer marker
+    # or, failing that, the last non-empty line -- so acronyms in the reasoning
+    # ("EBITDA", "ROE") cannot leak into the parsed answer.
+    lowered = text.lower()
+    for marker in ("答案", "正确选项", "应选", "answer:", "answer is", "answer"):
+        idx = lowered.rfind(marker)
+        if idx != -1:
+            text = text[idx + len(marker):]
+            break
+    else:
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        if lines:
+            text = lines[-1]
     max_ord = ord("A") + max(1, num_options) - 1
     letters: List[str] = []
     for m in _LETTER.finditer(text):

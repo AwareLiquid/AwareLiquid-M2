@@ -115,6 +115,34 @@ pytest
 The suite runs offline (mock backend, in-memory store) and covers chunking,
 compression, answer parsing and the end-to-end agent loop.
 
+## Validation
+
+`benchmarks/bench_adapter.py` measures the adapter's own contribution — retrieval
+and compression — on an adversarial financial QA set where a few answer-bearing
+sentences are buried in thousands of tokens of boilerplate:
+
+```bash
+python benchmarks/bench_adapter.py          # real multilingual embedder
+python benchmarks/bench_adapter.py --fake   # lexical stand-in, no model download
+```
+
+On the bundled set (3 documents inflated to ≈2,800 tokens each, 6 questions):
+
+| Metric | Real e5 | Lexical stand-in |
+|--------|:-------:|:----------------:|
+| Retrieval recall@4 (answer chunk retrieved) | **6/6** | 5/6 |
+| Answer-sentence retention after compression | **6/6** | 5/6 |
+| Prompt context tokens vs. full-document | **≈1.1k vs 17k (−94%)** | −94% |
+| Mean compression ratio | 0.48 | 0.46 |
+
+The semantic embedder recovers a paraphrased question ("归母净利润同比增长" vs. the
+document's "归属于母公司股东的净利润…较上年同期增长") that pure lexical overlap misses —
+which is why the multilingual model, not a keyword index, drives retrieval.
+
+**Scope:** this benchmark validates retrieval, compression and token efficiency,
+which are the adapter's job. The final letter is chosen by the frozen model, so
+end-to-end answer *accuracy* requires a live Qwen key and is not measured offline.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

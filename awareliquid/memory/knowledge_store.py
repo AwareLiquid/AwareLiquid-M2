@@ -54,10 +54,12 @@ CREATE TABLE IF NOT EXISTS knowledge (
     key_vec     BLOB    NOT NULL,    -- float32 L2-normalised key, length = key_dim
     content     BLOB    NOT NULL,    -- torch.save(content) bytes
     meta        BLOB,                -- torch.save(meta) bytes or NULL
+    doc_id      TEXT,                -- meta["doc_id"] hoisted out for fast filtering
     created_at  TEXT    NOT NULL,
     accessed_at TEXT    NOT NULL,    -- ISO time of last access (informational)
     access_seq  INTEGER NOT NULL     -- monotonic recency counter; the LRU sort key
 );
+CREATE INDEX IF NOT EXISTS idx_knowledge_doc_id ON knowledge(doc_id);
 """
 
 _PRAGMA = "PRAGMA journal_mode=WAL;"
@@ -166,17 +168,23 @@ class PersistentKnowledgeMemory:
         """
         key = self._validate_key(key)
         now = datetime.now(timezone.utc).isoformat()
+        # Hoist doc_id out of meta into its own indexed column so retrieval can
+        # rank WITHIN an allowed document set instead of globally-then-filtering.
+        doc_id = None
+        if isinstance(meta, dict) and meta.get("doc_id") is not None:
+            doc_id = str(meta["doc_id"])
         with self._lock:
             self._seq += 1
             cur = self._conn.execute(
                 """
-                INSERT INTO knowledge (key_vec, content, meta, created_at, accessed_at, access_seq)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO knowledge (key_vec, content, meta, doc_id, created_at, accessed_at, access_seq)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _key_to_bytes(key),
                     _obj_to_bytes(content),
                     _obj_to_bytes(meta) if meta is not None else None,
+                    doc_id,
                     now,
                     now,
                     self._seq,
@@ -198,6 +206,7 @@ class PersistentKnowledgeMemory:
         touch: bool = True,
         center: bool = False,
         return_ids: bool = False,
+        doc_ids: Optional[List[str]] = None,
     ) -> List[Tuple]:
         """Return the *top_k* records most similar to *key* by cosine similarity.
 
@@ -232,10 +241,22 @@ class PersistentKnowledgeMemory:
             raise ValueError(f"top_k must be positive, got {top_k}")
         q = self._validate_key(key)
 
+        # Restrict the candidate set to the given documents BEFORE scoring, so
+        # ranking (and centering) happen within the allowed set rather than
+        # globally-then-filtered -- which would drop allowed chunks that rank
+        # below the global top-k. An empty/None list means "all documents".
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT id, key_vec, content, meta FROM knowledge"
-            ).fetchall()
+            if doc_ids:
+                placeholders = ",".join("?" * len(doc_ids))
+                rows = self._conn.execute(
+                    f"SELECT id, key_vec, content, meta FROM knowledge "
+                    f"WHERE doc_id IN ({placeholders})",
+                    [str(d) for d in doc_ids],
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT id, key_vec, content, meta FROM knowledge"
+                ).fetchall()
         if not rows:
             return []
 
@@ -245,7 +266,11 @@ class PersistentKnowledgeMemory:
         keys = torch.stack(
             [_bytes_to_key(r[1], self.key_dim) for r in rows], dim=0
         )                                                   # (N, key_dim), already unit-norm
-        if center and keys.shape[0] >= 2:
+        # Centering needs enough vectors for the mean to be a meaningful estimate
+        # of the shared direction. At tiny N it is degenerate (at N=2 the two
+        # residuals are antipodal, forcing scores to +c/-c regardless of content),
+        # so fall back to plain cosine below the floor.
+        if center and keys.shape[0] >= 8:
             # Remove the shared dominant direction (corpus mean) from keys AND
             # query, then renormalise so the scores are cosines on the residual
             # (semantic) component. Computed from the stored keys only, so the

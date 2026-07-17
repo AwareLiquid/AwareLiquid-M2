@@ -65,7 +65,7 @@ class CompressedContext:
 class ExtractiveCompressor:
     """Local, LLM-free sentence selection under a character budget."""
 
-    def __init__(self, budget_chars: int = 1200, salience_weight: float = 1.5):
+    def __init__(self, budget_chars: int = 1200, salience_weight: float = 0.5):
         if budget_chars <= 0:
             raise ValueError(f"budget_chars must be positive, got {budget_chars}")
         self.budget_chars = int(budget_chars)
@@ -76,10 +76,16 @@ class ExtractiveCompressor:
         if not s_terms:
             return 0.0
         overlap = len(s_terms & q_terms)
+        # Question/option overlap is the primary signal. A fact-bearing sentence
+        # (number/%/currency/date) with ZERO overlap is a distractor here, not the
+        # answer, so it scores 0 -- otherwise numeric distractors would crowd out
+        # the answer sentence. Salience is only a tie-breaker AMONG overlapping
+        # sentences (the answer to a financial question usually carries a number).
+        if overlap == 0:
+            return 0.0
+        length_norm = overlap / (1.0 + len(s_terms) ** 0.5)
         salience = self.salience_weight if _SALIENT.search(sent) else 0.0
-        # Normalise overlap by sentence length so a long sentence cannot win on
-        # sheer size; add the flat salience bonus for fact-bearing sentences.
-        return overlap / (1.0 + len(s_terms) ** 0.5) + salience
+        return length_norm + salience
 
     def compress(self, question: str, passages: Sequence[str]) -> CompressedContext:
         """Select the most relevant sentences from *passages* under the budget."""
