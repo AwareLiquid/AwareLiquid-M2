@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Test / tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local vector stores / caches
+*.db
+*.db-shm
+*.db-wal
+.mt_lnn_knowledge.db
+.cache/
+data/
+
+# Model / HF caches
+.hf_cache/
+*.pt
+*.onnx
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Secrets
+.env
+*.key
