@@ -170,6 +170,87 @@ def _inflate(core: str, repeats: int = 8) -> str:
 DOCS = {did: _inflate(text) for did, text in DOCS.items()}
 
 
+# --------------------------------------------------------------------------
+# HARD scenario: exact-token disambiguation. Many near-identical sentences that
+# differ only in the exact token (year, figure) the question hinges on -- the
+# case where dense e5 blurs (every "YYYY 年营业收入为 X 亿元" embeds alike) and
+# BM25's exact-term match is decisive. This is 赛题四's cross-figure comparison.
+# --------------------------------------------------------------------------
+HARD_DOC = "\n".join(
+    [f"{y} 年营业收入为 {v} 亿元。" for y, v in
+     [(2018, "78.4"), (2019, "86.3"), (2020, "92.1"),
+      (2021, "98.6"), (2022, "114.9"), (2023, "124.5")]]
+    + [f"{y} 年归母净利润为 {v} 亿元。" for y, v in
+       [(2018, "7.9"), (2019, "9.1"), (2020, "10.4"),
+        (2021, "13.8"), (2022, "16.2"), (2023, "18.2")]]
+    + [f"{y} 年研发投入为 {v} 亿元。" for y, v in
+       [(2021, "7.2"), (2022, "8.5"), (2023, "9.7")]]
+)
+
+HARD_QUESTIONS = [
+    {"qid": "h1", "needle": "98.6", "question": "2021 年公司的营业收入是多少？",
+     "options": ["92.1 亿元", "98.6 亿元", "114.9 亿元", "124.5 亿元"], "qtype": "mcq"},
+    {"qid": "h2", "needle": "10.4", "question": "2020 年公司的归母净利润是多少？",
+     "options": ["9.1 亿元", "10.4 亿元", "13.8 亿元", "16.2 亿元"], "qtype": "mcq"},
+    {"qid": "h3", "needle": "114.9", "question": "2022 年公司的营业收入是多少？",
+     "options": ["98.6 亿元", "114.9 亿元", "124.5 亿元", "92.1 亿元"], "qtype": "mcq"},
+    {"qid": "h4", "needle": "8.5", "question": "2022 年公司的研发投入是多少？",
+     "options": ["7.2 亿元", "8.5 亿元", "9.7 亿元", "16.2 亿元"], "qtype": "mcq"},
+    {"qid": "h5", "needle": "9.1", "question": "2019 年公司的归母净利润是多少？",
+     "options": ["7.9 亿元", "9.1 亿元", "10.4 亿元", "13.8 亿元"], "qtype": "mcq"},
+    {"qid": "h6", "needle": "78.4", "question": "2018 年公司的营业收入是多少？",
+     "options": ["78.4 亿元", "86.3 亿元", "92.1 亿元", "98.6 亿元"], "qtype": "mcq"},
+]
+
+
+def run_hard(use_fake: bool) -> int:
+    """Exact-token disambiguation: dense vs hybrid recall@1 on near-identical rows."""
+    label = "lexical stand-in" if use_fake else "real e5 embedder"
+    print(f"=== HARD exact-token disambiguation ({label}) ===\n")
+    if use_fake:
+        enc = LexicalEncoder()
+    else:
+        from awareliquid.memory.encoder import SentenceEncoder
+        torch.set_num_threads(1)
+        enc = SentenceEncoder()
+    store = PersistentKnowledgeMemory(key_dim=enc.dim, db_path=":memory:")
+    # Small chunks so each fact is its OWN chunk -> retrieval must pick the exact row.
+    cfg = RetrievalConfig(max_chars=24, overlap_chars=0, top_k=5)
+    agent = MemoryQAAgent(encoder=enc, store=store, chat_client=MockChatClient(), config=cfg)
+    n_chunks = agent.ingest_document("metrics", HARD_DOC)
+    print(f"  ingested metrics -> {n_chunks} single-fact chunks\n")
+
+    def measure() -> tuple:
+        r1 = correct = 0
+        rows = []
+        for q in HARD_QUESTIONS:
+            hits = agent.retrieve(q["question"], doc_ids=["metrics"], options=q["options"])
+            top1 = bool(hits) and q["needle"] in hits[0]
+            r1 += top1
+            res = agent.answer_question(qid=q["qid"], question=q["question"],
+                                        options=q["options"], qtype=q["qtype"], doc_ids=["metrics"])
+            ok = res.answer == "B" if q["qid"] in ("h1", "h2", "h3", "h5") else True
+            correct += ok
+            rows.append((q["qid"], int(top1)))
+        return r1, rows
+
+    agent.config.hybrid = False
+    d_r1, d_rows = measure()
+    agent.config.hybrid = True
+    h_r1, h_rows = measure()
+
+    n = len(HARD_QUESTIONS)
+    print("  per-question recall@1 (dense -> hybrid):")
+    for (qid, dr), (_, hr) in zip(d_rows, h_rows):
+        arrow = "" if dr == hr else ("  <-- recovered by BM25" if hr > dr else "  <-- REGRESSED")
+        print(f"    {qid}: {dr} -> {hr}{arrow}")
+    print(f"\n  recall@1 (exact row in TOP chunk): "
+          f"dense {d_r1}/{n} ({100*d_r1/n:.0f}%)  ->  hybrid {h_r1}/{n} ({100*h_r1/n:.0f}%)")
+    delta = h_r1 - d_r1
+    print(f"  hybrid delta: {'+' if delta >= 0 else ''}{delta} question(s)")
+    return 0 if h_r1 >= d_r1 else 1
+
+
 def build_agent(use_fake: bool) -> MemoryQAAgent:
     if use_fake:
         enc = LexicalEncoder()
@@ -259,5 +340,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--fake", action="store_true",
                     help="use the lexical stand-in encoder (no model download)")
+    ap.add_argument("--hard", action="store_true",
+                    help="run the exact-token disambiguation scenario (dense vs hybrid)")
     args = ap.parse_args()
-    sys.exit(run(args.fake))
+    sys.exit(run_hard(args.fake) if args.hard else run(args.fake))
