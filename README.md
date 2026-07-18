@@ -100,6 +100,21 @@ Retrieval and compression are tunable via `RetrievalConfig` (chunk size, overlap
 `top_k`, compression budget, answer-token cap, and hybrid-retrieval settings:
 `hybrid`, `rrf_k`, `rrf_pool`, dense/sparse fusion weights).
 
+## Batch answering
+
+Answer a whole question set and write a CSV (`qid,answer,prompt_tokens,
+completion_tokens,total_tokens`, with a leading `summary` totals row):
+
+```bash
+python submit.py --questions examples/sample_questions.jsonl \
+                 --docs examples/sample_docs.json --out submission.csv
+```
+
+Questions are JSONL/JSON (`qid`, `question`, `options` as a `{letter: text}` dict
+or a list, `answer_format`, `doc_ids`); docs are a `{doc_id: text}` JSON or a
+directory of `<doc_id>.txt` files. To score a labelled set end-to-end (accuracy +
+tokens), use `examples/eval_accuracy.py`.
+
 ## Token accounting
 
 Every chat call reports exact `prompt_tokens` / `completion_tokens` /

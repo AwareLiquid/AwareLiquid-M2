@@ -174,7 +174,7 @@ DOCS = {did: _inflate(text) for did, text in DOCS.items()}
 # HARD scenario: exact-token disambiguation. Many near-identical sentences that
 # differ only in the exact token (year, figure) the question hinges on -- the
 # case where dense e5 blurs (every "YYYY 年营业收入为 X 亿元" embeds alike) and
-# BM25's exact-term match is decisive. This is 赛题四's cross-figure comparison.
+# BM25's exact-term match is decisive -- the cross-figure comparison case.
 # --------------------------------------------------------------------------
 HARD_DOC = "\n".join(
     [f"{y} 年营业收入为 {v} 亿元。" for y, v in

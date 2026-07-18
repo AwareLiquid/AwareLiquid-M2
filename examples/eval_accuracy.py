@@ -1,8 +1,8 @@
 """End-to-end accuracy + token-cost evaluation on a labelled question set.
 
 Runs the full ingest -> retrieve -> compress -> answer loop against questions
-that carry a ground-truth answer, and reports the two things the competition
-score is built from:
+that carry a ground-truth answer, and reports the two things the scoring rule is
+built from:
 
     score = accuracy x (0.7 + 0.3 x token_efficiency)
     token_efficiency = max(0, (budget - tokens_used) / budget)
