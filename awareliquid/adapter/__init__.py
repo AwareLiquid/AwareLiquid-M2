@@ -16,11 +16,13 @@ from .qwen_client import (
 )
 from .chunker import Chunk, chunk_document
 from .compressor import CompressedContext, ExtractiveCompressor
+from .hybrid import rrf_fuse
 from .schemas import AnswerResult, parse_answer, summarize_usage
 
 __all__ = [
     "MemoryQAAgent",
     "RetrievalConfig",
+    "rrf_fuse",
     "QwenChatClient",
     "MockChatClient",
     "ChatResult",

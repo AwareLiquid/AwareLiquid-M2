@@ -35,3 +35,6 @@ data/
 # Secrets
 .env
 *.key
+
+# Local-only strategy notes (not published)
+docs/analysis/

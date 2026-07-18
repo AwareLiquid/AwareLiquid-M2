@@ -30,8 +30,9 @@ ingest(doc_id, text)
 
 answer_question(qid, question, options, qtype, doc_ids)
         │
-        ├─ SentenceEncoder(query) ............ embed the question
-        ├─ store.query (centered cosine) ..... top-k passages, filtered to doc_ids
+        ├─ SentenceEncoder(query) ............ embed the question (+ options)
+        ├─ hybrid retrieve ................... dense cosine ⊕ BM25, RRF-fused,
+        │                                      filtered to doc_ids → top-k passages
         ├─ ExtractiveCompressor .............. keep only load-bearing sentences
         │                                      (question overlap + numeric salience),
         │                                      LLM-free → 0 generation tokens
@@ -45,8 +46,9 @@ answer_question(qid, question, options, qtype, doc_ids)
 
 | Module | Responsibility | Key properties |
 |--------|----------------|----------------|
-| `memory/knowledge_store.py` | SQLite vector store | cosine retrieval, anisotropy-robust centering, thread-safe, optional LRU cap, zero model coupling |
+| `memory/knowledge_store.py` | SQLite vector store + BM25 index | cosine retrieval, FTS5/BM25 lexical channel (trigram, CJK-safe), doc-id filtering in-scan, anisotropy-robust centering, thread-safe, optional LRU cap, zero model coupling |
 | `memory/encoder.py` | Sentence embedding | lazy load, multilingual `e5` default (Chinese + English), `bge` selectable, asymmetric query/passage prefixes |
+| `adapter/hybrid.py` | Rank fusion | Reciprocal Rank Fusion of the dense + lexical channels (rank-based, no score calibration) |
 | `adapter/chunker.py` | Document → passages | boundary-aware, decimal-safe splitting, configurable size + overlap |
 | `adapter/compressor.py` | Context compression | extractive, LLM-free, char-budgeted, numeric/currency/date salience bonus |
 | `adapter/qwen_client.py` | Generation + accounting | OpenAI-compatible, stdlib HTTP, exact token usage, offline mock fallback |

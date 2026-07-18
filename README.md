@@ -37,8 +37,8 @@ at — reading a short, relevant context and answering — and nothing else.
 |-------|--------|--------------|
 | **Chunk** | `adapter/chunker.py` | Split documents on sentence/paragraph boundaries into overlapping passages (language-agnostic, handles Chinese). |
 | **Embed** | `memory/encoder.py` | Lazy, L2-normalised multilingual sentence embedder (`intfloat/multilingual-e5-small` by default; `bge` selectable). |
-| **Store** | `memory/knowledge_store.py` | SQLite-backed, content-addressable vector store with cosine retrieval, an anisotropy-robust centering option, and an optional LRU cap. |
-| **Retrieve** | `adapter/qa_agent.py` | Top-k passage retrieval, restricted to a caller-supplied document set. |
+| **Store** | `memory/knowledge_store.py` | SQLite-backed vector store (cosine) **plus an FTS5/BM25 lexical index**, content-addressable, with an anisotropy-robust centering option and an optional LRU cap. |
+| **Retrieve** | `adapter/qa_agent.py` + `adapter/hybrid.py` | **Hybrid retrieval**: dense (e5 cosine) and lexical (BM25) channels fused with Reciprocal Rank Fusion, restricted to a caller-supplied document set. Dense captures meaning; BM25 captures exact tokens (rates, rating codes, `FY2023`). Falls back to dense-only when FTS5 is unavailable. |
 | **Compress** | `adapter/compressor.py` | Extractive, **LLM-free** sentence selection under a character budget — keeps sentences by question overlap plus a salience bonus for numbers, %, currency and dates. Compression itself costs **zero** generation tokens. |
 | **Answer** | `adapter/qwen_client.py` | OpenAI-compatible Qwen chat call with exact per-call token accounting. |
 
@@ -97,7 +97,8 @@ python examples/run_qa.py
 ```
 
 Retrieval and compression are tunable via `RetrievalConfig` (chunk size, overlap,
-`top_k`, compression budget, answer-token cap).
+`top_k`, compression budget, answer-token cap, and hybrid-retrieval settings:
+`hybrid`, `rrf_k`, `rrf_pool`, dense/sparse fusion weights).
 
 ## Token accounting
 

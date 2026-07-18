@@ -33,12 +33,13 @@ small tensors) stored via ``torch.save``.
 from __future__ import annotations
 
 import io
+import re
 import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -137,6 +138,22 @@ class PersistentKnowledgeMemory:
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
+        # Optional lexical channel: an FTS5 full-text table mirroring the text
+        # content, for BM25 keyword retrieval alongside the dense (cosine) channel
+        # (hybrid retrieval). FTS5 is compiled into most SQLite builds but not all,
+        # so degrade gracefully to dense-only when it is unavailable. The trigram
+        # tokenizer gives substring matching that works for space-less CJK too.
+        self._fts_enabled = False
+        try:
+            self._conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts "
+                "USING fts5(content, doc_id UNINDEXED, tokenize='trigram')"
+            )
+            self._conn.commit()
+            self._fts_enabled = True
+        except sqlite3.OperationalError:
+            self._fts_enabled = False
+
         # Monotonic recency counter used as the LRU sort key. Resolution-
         # independent (a wall-clock timestamp can collide when many ops land in
         # the same microsecond, which silently breaks LRU ordering). Seed it from
@@ -190,8 +207,15 @@ class PersistentKnowledgeMemory:
                     self._seq,
                 ),
             )
-            self._conn.commit()
             row_id = int(cur.lastrowid)
+            # Mirror plain-text content into the lexical (FTS5) index so the same
+            # record is retrievable by BM25. Only str content is indexable.
+            if self._fts_enabled and isinstance(content, str):
+                self._conn.execute(
+                    "INSERT INTO knowledge_fts (rowid, content, doc_id) VALUES (?, ?, ?)",
+                    (row_id, content, doc_id),
+                )
+            self._conn.commit()
             self._enforce_capacity()
             return row_id
 
@@ -322,6 +346,60 @@ class PersistentKnowledgeMemory:
         return hits[0][0] if hits else None
 
     # ------------------------------------------------------------------
+    # Lexical (BM25) channel
+    # ------------------------------------------------------------------
+
+    def search_bm25(
+        self,
+        query_text: str,
+        top_k: int = 10,
+        doc_ids: Optional[Sequence[str]] = None,
+    ) -> List[Tuple[int, str, Optional[Any]]]:
+        """Return up to *top_k* records matching *query_text* by BM25, best first.
+
+        Each hit is ``(id, content, meta)``. Returns an empty list when FTS5 is
+        unavailable, the query has no usable terms, or nothing matches -- so a
+        caller can always fall back to the dense channel. This is the lexical half
+        of hybrid retrieval; fuse it with :meth:`query` (dense) via RRF.
+        """
+        if not self._fts_enabled or not query_text or not query_text.strip():
+            return []
+        match = self._fts_query(query_text)
+        if not match:
+            return []
+        sql = "SELECT rowid, content FROM knowledge_fts WHERE knowledge_fts MATCH ?"
+        params: List[Any] = [match]
+        if doc_ids:
+            placeholders = ",".join("?" * len(doc_ids))
+            sql += f" AND doc_id IN ({placeholders})"
+            params += [str(d) for d in doc_ids]
+        # bm25() is ascending-better; ORDER BY it directly for best-first.
+        sql += " ORDER BY bm25(knowledge_fts) LIMIT ?"
+        params.append(int(top_k))
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, params).fetchall()
+            except sqlite3.OperationalError:
+                return []
+            if not rows:
+                return []
+            ids = [int(r[0]) for r in rows]
+            ph = ",".join("?" * len(ids))
+            meta_rows = self._conn.execute(
+                f"SELECT id, meta FROM knowledge WHERE id IN ({ph})", ids
+            ).fetchall()
+        meta_by_id = {
+            int(r[0]): (_bytes_to_obj(r[1]) if r[1] is not None else None)
+            for r in meta_rows
+        }
+        return [(int(r[0]), str(r[1]), meta_by_id.get(int(r[0]))) for r in rows]
+
+    @property
+    def fts_enabled(self) -> bool:
+        """Whether the lexical (FTS5/BM25) channel is available in this build."""
+        return self._fts_enabled
+
+    # ------------------------------------------------------------------
     # Bookkeeping
     # ------------------------------------------------------------------
 
@@ -333,6 +411,8 @@ class PersistentKnowledgeMemory:
         """Delete all stored knowledge."""
         with self._lock:
             self._conn.execute("DELETE FROM knowledge")
+            if self._fts_enabled:
+                self._conn.execute("DELETE FROM knowledge_fts")
             self._conn.commit()
 
     def delete(self, ids) -> int:
@@ -345,6 +425,9 @@ class PersistentKnowledgeMemory:
         with self._lock:
             self._conn.executemany("DELETE FROM knowledge WHERE id = ?",
                                    [(i,) for i in ids])
+            if self._fts_enabled:
+                self._conn.executemany("DELETE FROM knowledge_fts WHERE rowid = ?",
+                                       [(i,) for i in ids])
             self._conn.commit()
         return len(ids)
 
@@ -372,6 +455,39 @@ class PersistentKnowledgeMemory:
             )
         return _normalise(vec)
 
+    @staticmethod
+    def _fts_query(text: str) -> Optional[str]:
+        """Build a safe FTS5 MATCH string from free text.
+
+        Emits an OR of QUOTED tokens so punctuation in the raw text can never be
+        mis-parsed as FTS5 query syntax. Under the ``trigram`` tokenizer a token
+        must be >= 3 characters to form an index token, so:
+
+        * Latin / numeric runs (incl. ``.``/``%``, e.g. ``3.45%``, ``124.5``,
+          ``AAA``) are kept whole when >= 3 chars -- exact financial tokens.
+        * CJK runs are expanded into overlapping 3-char slices, which the trigram
+          tokenizer matches as substrings of the stored text.
+        """
+        tokens: List[str] = []
+        for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9.%\-/]*", text):
+            if len(w) >= 3:
+                tokens.append(w.lower())
+        for run in re.findall(r"[一-鿿]+", text):
+            if len(run) >= 3:
+                tokens.extend(run[i : i + 3] for i in range(len(run) - 2))
+        if not tokens:
+            return None
+        seen: set = set()
+        quoted: List[str] = []
+        for t in tokens:
+            if t in seen:
+                continue
+            seen.add(t)
+            quoted.append('"' + t.replace('"', '""') + '"')
+            if len(quoted) >= 80:  # keep the MATCH string bounded
+                break
+        return " OR ".join(quoted)
+
     def _enforce_capacity(self) -> None:
         """Evict least-recently-accessed records until within ``max_entries``."""
         if self.max_entries is None:
@@ -381,14 +497,14 @@ class PersistentKnowledgeMemory:
             return
         overflow = n - self.max_entries
         # Lowest recency counter first → least-recently-used eviction.
-        self._conn.execute(
-            """
-            DELETE FROM knowledge WHERE id IN (
-                SELECT id FROM knowledge ORDER BY access_seq ASC, id ASC LIMIT ?
-            )
-            """,
+        evicted = self._conn.execute(
+            "SELECT id FROM knowledge ORDER BY access_seq ASC, id ASC LIMIT ?",
             (overflow,),
-        )
+        ).fetchall()
+        evicted_ids = [(int(r[0]),) for r in evicted]
+        self._conn.executemany("DELETE FROM knowledge WHERE id = ?", evicted_ids)
+        if self._fts_enabled and evicted_ids:
+            self._conn.executemany("DELETE FROM knowledge_fts WHERE rowid = ?", evicted_ids)
         self._conn.commit()
 
     # Context-manager support

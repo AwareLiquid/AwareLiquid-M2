@@ -21,6 +21,7 @@ from ..memory.encoder import SentenceEncoder
 from ..memory.knowledge_store import PersistentKnowledgeMemory
 from .chunker import chunk_document
 from .compressor import ExtractiveCompressor
+from .hybrid import rrf_fuse
 from .qwen_client import ChatResult, build_chat_client
 from .schemas import AnswerResult, parse_answer
 
@@ -43,6 +44,13 @@ class RetrievalConfig:
     top_k: int = 6
     compression_budget: int = 1200
     max_answer_tokens: int = 16
+    # -- hybrid retrieval (dense cosine + lexical BM25, fused with RRF) --
+    hybrid: bool = True          # fuse BM25 with cosine when FTS5 is available
+    rrf_pool: int = 20           # candidates per channel before fusion
+    rrf_k: int = 10              # RRF constant (small = sharper head)
+    w_dense: float = 0.7         # dense (semantic) fusion weight
+    w_sparse: float = 0.3        # lexical (BM25) fusion weight
+    center: bool = True          # anisotropy-robust centered cosine for the dense channel
 
 
 class MemoryQAAgent:
@@ -109,19 +117,39 @@ class MemoryQAAgent:
     ) -> List[str]:
         """Return the top-k chunk texts for *question*, restricted to *doc_ids*.
 
-        The document filter is applied inside the store's scan, so ranking (and
-        centering) happen *within* the allowed set rather than globally then
-        filtered -- which would drop allowed chunks that rank below the global
-        top-k. When ``doc_ids`` is None, all ingested docs are eligible.
+        Hybrid retrieval: the dense (cosine) and lexical (BM25) channels each
+        retrieve a wider pool, fused with RRF into the final top-k. The document
+        filter is applied inside each channel's scan, so ranking happens *within*
+        the allowed set rather than globally then filtered. Falls back to
+        dense-only when hybrid is disabled or FTS5 is unavailable in this build.
+        When ``doc_ids`` is None, all ingested docs are eligible.
         """
         if len(self.store) == 0:
             return []
         allowed = [str(d) for d in doc_ids] if doc_ids else None
-        q_key = self.encoder.encode(self._enrich(question, options), is_query=True)
-        hits = self.store.query(
-            q_key, top_k=self.config.top_k, center=True, doc_ids=allowed
+        enriched = self._enrich(question, options)
+        q_key = self.encoder.encode(enriched, is_query=True)
+
+        use_hybrid = self.config.hybrid and self.store.fts_enabled
+        pool = max(self.config.top_k, self.config.rrf_pool) if use_hybrid else self.config.top_k
+        dense = self.store.query(
+            q_key, top_k=pool, center=self.config.center, return_ids=True, doc_ids=allowed
         )
-        return [str(content) for content, _score, _meta in hits]
+        dense_hits = [(h[0], h[1], h[3]) for h in dense]  # (id, content, meta)
+
+        if not use_hybrid:
+            return [c for _id, c, _m in dense_hits[: self.config.top_k]]
+
+        sparse_hits = self.store.search_bm25(enriched, top_k=pool, doc_ids=allowed)
+        fused = rrf_fuse(
+            dense_hits,
+            sparse_hits,
+            k=self.config.rrf_k,
+            w_dense=self.config.w_dense,
+            w_sparse=self.config.w_sparse,
+            top_k=self.config.top_k,
+        )
+        return [c for _id, c, _m in fused]
 
     # -- answer -----------------------------------------------------------
     def answer_question(

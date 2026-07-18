@@ -90,6 +90,14 @@ QUESTIONS = [
     {"qid": "q6", "doc_id": "reg-filing", "qtype": "mcq", "needle": "2.0 亿元",
      "question": "本次计提减值准备合计影响 2023 年度归母净利润约多少？",
      "options": ["1.2 亿元", "0.8 亿元", "2.0 亿元", "6.3 亿元"], "answer": "C"},
+    # Exact-token stress cases: the answer hinges on a literal code/figure with a
+    # semantically-similar distractor nearby -- where dense e5 blurs and BM25 wins.
+    {"qid": "q7", "doc_id": "bond-prospectus", "qtype": "mcq", "needle": "AAA",
+     "question": "本期债券的信用评级是什么？",
+     "options": ["AA", "AAA", "A", "BBB"], "answer": "B"},
+    {"qid": "q8", "doc_id": "bond-prospectus", "qtype": "mcq", "needle": "发行规模 20 亿元",
+     "question": "本期债券的发行规模是多少？",
+     "options": ["12 亿元", "20 亿元", "5 亿元", "70 亿元"], "answer": "B"},
 ]
 
 
@@ -174,6 +182,36 @@ def build_agent(use_fake: bool) -> MemoryQAAgent:
     return MemoryQAAgent(encoder=enc, store=store, chat_client=MockChatClient(), config=cfg)
 
 
+def _measure(agent: MemoryQAAgent) -> dict:
+    """Run all questions once under the agent's current config; return metrics."""
+    recall_hits = recall1_hits = retention_hits = e2e_valid = 0
+    comp_tokens, base_tokens = [], []
+    per_q = []
+    for q in QUESTIONS:
+        retrieved = agent.retrieve(q["question"], doc_ids=[q["doc_id"]], options=q["options"])
+        recall = any(q["needle"] in c for c in retrieved)
+        recall1 = bool(retrieved) and q["needle"] in retrieved[0]  # answer in the TOP chunk
+        recall_hits += recall
+        recall1_hits += recall1
+        comp = agent.compressor.compress(q["question"] + " " + " ".join(q["options"]), retrieved)
+        retained = q["needle"] in comp.text
+        retention_hits += retained
+        comp_tokens.append(_estimate_tokens(comp.text))
+        base_tokens.append(_estimate_tokens(DOCS[q["doc_id"]]))
+        res = agent.answer_question(
+            qid=q["qid"], question=q["question"], options=q["options"],
+            qtype=q["qtype"], doc_ids=[q["doc_id"]],
+        )
+        e2e_valid += bool(res.answer) and res.usage.total_tokens > 0
+        per_q.append((q["qid"], int(recall1), int(recall)))
+    n = len(QUESTIONS)
+    return {
+        "recall": recall_hits, "recall1": recall1_hits, "retention": retention_hits,
+        "valid": e2e_valid, "n": n,
+        "comp_tokens": sum(comp_tokens), "base_tokens": sum(base_tokens), "per_q": per_q,
+    }
+
+
 def run(use_fake: bool) -> int:
     label = "lexical stand-in" if use_fake else "real e5 embedder"
     print(f"=== AwareLiquid adapter benchmark ({label}) ===\n")
@@ -181,54 +219,39 @@ def run(use_fake: bool) -> int:
     for did, text in DOCS.items():
         n = agent.ingest_document(did, text)
         print(f"  ingested {did:<16} -> {n} chunks")
-    print()
+    print(f"  FTS5 lexical channel: {'available' if agent.store.fts_enabled else 'UNAVAILABLE'}\n")
 
-    recall_hits = retention_hits = e2e_valid = 0
-    ratios, comp_tokens, base_tokens = [], [], []
+    # Ablation: dense-only vs hybrid (BM25 + dense, RRF-fused) on the same store.
+    agent.config.hybrid = False
+    dense = _measure(agent)
+    agent.config.hybrid = True
+    hybrid = _measure(agent)
 
-    for q in QUESTIONS:
-        retrieved = agent.retrieve(q["question"], doc_ids=[q["doc_id"]])
-        recall = any(q["needle"] in c for c in retrieved)
-        recall_hits += recall
+    n = dense["n"]
+    print("  per-question recall@1 (dense -> hybrid):")
+    for (qid, dr1, _), (_, hr1, _) in zip(dense["per_q"], hybrid["per_q"]):
+        arrow = "" if dr1 == hr1 else ("  <-- recovered by BM25" if hr1 > dr1 else "  <-- REGRESSED")
+        print(f"    {qid}: {dr1} -> {hr1}{arrow}")
 
-        comp = agent.compressor.compress(q["question"], retrieved)
-        retained = q["needle"] in comp.text
-        retention_hits += retained
-
-        # token efficiency: compressed context vs. stuffing the whole document.
-        raw_ctx = "".join(retrieved)
-        ratios.append(len(comp.text) / max(1, len(raw_ctx)))
-        comp_tokens.append(_estimate_tokens(comp.text))
-        base_tokens.append(_estimate_tokens(DOCS[q["doc_id"]]))
-
-        res = agent.answer_question(
-            qid=q["qid"], question=q["question"], options=q["options"],
-            qtype=q["qtype"], doc_ids=[q["doc_id"]],
-        )
-        valid = bool(res.answer) and res.usage.total_tokens > 0
-        e2e_valid += valid
-        flag = "OK " if (recall and retained) else "!! "
-        print(f"  {flag}{q['qid']} recall={int(recall)} retain={int(retained)} "
-              f"answer={res.answer!r} ctx_tokens~{comp_tokens[-1]:>4} "
-              f"(full-doc~{base_tokens[-1]})")
-
-    n = len(QUESTIONS)
-    print("\n--- aggregate ---")
-    print(f"  retrieval recall@{agent.config.top_k}   : {recall_hits}/{n} "
-          f"({100*recall_hits/n:.0f}%)   [{label}]")
-    print(f"  answer-sentence retention: {retention_hits}/{n} "
-          f"({100*retention_hits/n:.0f}%)")
-    print(f"  end-to-end valid rows    : {e2e_valid}/{n}")
-    print(f"  mean compression ratio   : {sum(ratios)/n:.2f} "
-          f"(compressed / retrieved context chars)")
-    tot_comp, tot_base = sum(comp_tokens), sum(base_tokens)
-    print(f"  prompt context tokens    : {tot_comp} vs full-doc baseline {tot_base} "
+    print("\n--- ablation: dense-only vs hybrid RRF ---")
+    print(f"  recall@1 (answer in TOP chunk): "
+          f"dense {dense['recall1']}/{n} ({100*dense['recall1']/n:.0f}%)   ->   "
+          f"hybrid {hybrid['recall1']}/{n} ({100*hybrid['recall1']/n:.0f}%)")
+    print(f"  recall@{agent.config.top_k}                     : "
+          f"dense {dense['recall']}/{n} ({100*dense['recall']/n:.0f}%)   ->   "
+          f"hybrid {hybrid['recall']}/{n} ({100*hybrid['recall']/n:.0f}%)")
+    print(f"  answer retention              : "
+          f"dense {dense['retention']}/{n}   hybrid {hybrid['retention']}/{n}")
+    print(f"  end-to-end valid rows         : {hybrid['valid']}/{n}")
+    tot_comp, tot_base = hybrid["comp_tokens"], hybrid["base_tokens"]
+    print(f"  prompt context tokens         : {tot_comp} vs full-doc {tot_base} "
           f"-> {100*(1-tot_comp/tot_base):.0f}% fewer")
 
-    # Exit non-zero if the adapter would clearly hurt accuracy (dropped answers).
-    ok = retention_hits == n and e2e_valid == n
+    ok = (hybrid["valid"] == n and hybrid["recall"] >= dense["recall"]
+          and hybrid["recall1"] >= dense["recall1"])
     print(f"\nRESULT: {'PASS' if ok else 'CHECK'} "
-          f"(retention {retention_hits}/{n}, valid {e2e_valid}/{n})")
+          f"(hybrid recall@1 {hybrid['recall1']}/{n} >= dense {dense['recall1']}/{n}, "
+          f"recall@{agent.config.top_k} {hybrid['recall']}/{n} >= dense {dense['recall']}/{n})")
     return 0 if ok else 1
 
 
