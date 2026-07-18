@@ -97,8 +97,10 @@ python examples/run_qa.py
 ```
 
 Retrieval and compression are tunable via `RetrievalConfig` (chunk size, overlap,
-`top_k`, compression budget, answer-token cap, and hybrid-retrieval settings:
-`hybrid`, `rrf_k`, `rrf_pool`, dense/sparse fusion weights).
+`top_k`, compression budget, answer-token cap, hybrid-retrieval settings
+(`hybrid`, `rrf_k`, `rrf_pool`, dense/sparse weights), and optional multi-query
+retrieval (`multi_query`) that issues a sub-query per temporal operand and option
+and unions the results — for cross-document comparison / computation questions).
 
 ## Batch answering
 

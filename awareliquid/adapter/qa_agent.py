@@ -14,8 +14,9 @@ short answer.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..memory.encoder import SentenceEncoder
 from ..memory.knowledge_store import PersistentKnowledgeMemory
@@ -24,6 +25,26 @@ from .compressor import ExtractiveCompressor
 from .hybrid import rrf_fuse
 from .qwen_client import ChatResult, build_chat_client
 from .schemas import AnswerResult, parse_answer
+
+# Temporal anchors that split a comparison/computation question into operands:
+# a year ("2023" / "2023 年"), or a quarter ("Q3", "第三季度", "三季度"/"上半年").
+_YEAR = re.compile(r"(?:19|20)\d{2}")
+_QUARTER = re.compile(r"Q[1-4]|第[一二三四1-4]季度|[上下]半年|[一二三四1-4]季度")
+
+
+def _detect_anchors(question: str) -> List[str]:
+    """Distinct temporal operands in *question*, used to build per-operand
+    sub-queries. Returns [] when there is at most one, so a single-target
+    question is not needlessly fanned out."""
+    anchors: List[str] = []
+    seen: set = set()
+    for m in list(_YEAR.finditer(question)) + list(_QUARTER.finditer(question)):
+        tok = m.group()
+        if tok not in seen:
+            seen.add(tok)
+            anchors.append(tok)
+    return anchors if len(anchors) >= 2 else []
+
 
 _SYSTEM_PROMPT = (
     "You are a precise financial document analyst. Answer the multiple-choice "
@@ -51,6 +72,9 @@ class RetrievalConfig:
     w_dense: float = 0.7         # dense (semantic) fusion weight
     w_sparse: float = 0.3        # lexical (BM25) fusion weight
     center: bool = True          # anisotropy-robust centered cosine for the dense channel
+    # -- multi-query retrieval (per-option sub-queries, union) --
+    multi_query: bool = False    # retrieve the question + each option separately, then union
+    multi_query_cap: int = 8     # max chunks kept after the union
 
 
 class MemoryQAAgent:
@@ -109,47 +133,76 @@ class MemoryQAAgent:
             return question + " " + " ".join(str(o) for o in options)
         return question
 
+    def _hybrid_hits(
+        self, query_text: str, allowed: Optional[List[str]], limit: int
+    ) -> List[Tuple[int, str]]:
+        """One retrieval pass for *query_text*: dense (cosine) and lexical (BM25)
+        channels fused with RRF, returning ``(id, content)`` best-first. Falls
+        back to dense-only when hybrid is off or FTS5 is unavailable."""
+        q_key = self.encoder.encode(query_text, is_query=True)
+        use_hybrid = self.config.hybrid and self.store.fts_enabled
+        pool = max(limit, self.config.rrf_pool) if use_hybrid else limit
+        dense = self.store.query(
+            q_key, top_k=pool, center=self.config.center, return_ids=True, doc_ids=allowed
+        )
+        dense_hits = [(h[0], h[1], h[3]) for h in dense]  # (id, content, meta)
+        if not use_hybrid:
+            return [(rid, c) for rid, c, _m in dense_hits[:limit]]
+        sparse_hits = self.store.search_bm25(query_text, top_k=pool, doc_ids=allowed)
+        fused = rrf_fuse(
+            dense_hits, sparse_hits, k=self.config.rrf_k,
+            w_dense=self.config.w_dense, w_sparse=self.config.w_sparse, top_k=limit,
+        )
+        return [(rid, c) for rid, c, _m in fused]
+
     def retrieve(
         self,
         question: str,
         doc_ids: Optional[Sequence[str]] = None,
         options: Optional[Sequence[str]] = None,
     ) -> List[str]:
-        """Return the top-k chunk texts for *question*, restricted to *doc_ids*.
+        """Return the top chunk texts for *question*, restricted to *doc_ids*.
 
-        Hybrid retrieval: the dense (cosine) and lexical (BM25) channels each
-        retrieve a wider pool, fused with RRF into the final top-k. The document
-        filter is applied inside each channel's scan, so ranking happens *within*
-        the allowed set rather than globally then filtered. Falls back to
-        dense-only when hybrid is disabled or FTS5 is unavailable in this build.
-        When ``doc_ids`` is None, all ingested docs are eligible.
+        Single-pass (default): one hybrid retrieval over the question enriched
+        with the option text. The dense + BM25 channels each retrieve a wider
+        pool, fused with RRF; the doc filter is applied inside each channel's scan
+        so ranking happens *within* the allowed set. When ``doc_ids`` is None all
+        ingested docs are eligible.
+
+        Multi-query (``config.multi_query``): retrieve the bare question AND each
+        option as a separate sub-query, then union the results (keeping each
+        chunk's best rank across sub-queries). Comparison / formula questions need
+        evidence for *several* targets at once — one averaged query embedding
+        tends to retrieve only one side, so per-target sub-queries surface every
+        operand. Retrieval is local, so this costs no generation tokens; the extra
+        chunks are still bounded by ``multi_query_cap`` and the compression budget.
         """
         if len(self.store) == 0:
             return []
         allowed = [str(d) for d in doc_ids] if doc_ids else None
+
+        if self.config.multi_query and (options or _detect_anchors(question)):
+            # Sub-queries: the bare question, one anchor-boosted query per temporal
+            # operand in the question (so a comparison/computation retrieves BOTH
+            # sides), and one option-boosted query per option (for fact-matching
+            # mcq, where the answer sentence echoes an option's wording).
+            subqueries = [question]
+            subqueries += [f"{a} {question}" for a in _detect_anchors(question)]
+            subqueries += [f"{question} {o}" for o in (options or [])]
+            best: Dict[int, Tuple[float, str]] = {}
+            for sq in subqueries:
+                for rank, (rid, content) in enumerate(
+                    self._hybrid_hits(sq, allowed, self.config.top_k)
+                ):
+                    score = 1.0 / (1 + rank)  # best rank of this chunk across sub-queries
+                    if rid not in best or score > best[rid][0]:
+                        best[rid] = (score, content)
+            ranked = sorted(best.values(), key=lambda sc: sc[0], reverse=True)
+            cap = max(self.config.top_k, self.config.multi_query_cap)
+            return [content for _score, content in ranked[:cap]]
+
         enriched = self._enrich(question, options)
-        q_key = self.encoder.encode(enriched, is_query=True)
-
-        use_hybrid = self.config.hybrid and self.store.fts_enabled
-        pool = max(self.config.top_k, self.config.rrf_pool) if use_hybrid else self.config.top_k
-        dense = self.store.query(
-            q_key, top_k=pool, center=self.config.center, return_ids=True, doc_ids=allowed
-        )
-        dense_hits = [(h[0], h[1], h[3]) for h in dense]  # (id, content, meta)
-
-        if not use_hybrid:
-            return [c for _id, c, _m in dense_hits[: self.config.top_k]]
-
-        sparse_hits = self.store.search_bm25(enriched, top_k=pool, doc_ids=allowed)
-        fused = rrf_fuse(
-            dense_hits,
-            sparse_hits,
-            k=self.config.rrf_k,
-            w_dense=self.config.w_dense,
-            w_sparse=self.config.w_sparse,
-            top_k=self.config.top_k,
-        )
-        return [c for _id, c, _m in fused]
+        return [c for _rid, c in self._hybrid_hits(enriched, allowed, self.config.top_k)]
 
     # -- answer -----------------------------------------------------------
     def answer_question(
