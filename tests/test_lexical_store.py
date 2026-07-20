@@ -34,6 +34,33 @@ def test_lexical_store_matches_two_character_chinese_terms_and_metadata():
     assert store.available_doc_ids() == ["insurance", "rates"]
 
 
+def test_bm25_structural_bonus_prefers_exact_amount_anchor():
+    store = LexicalKnowledgeMemory(":memory:")
+    store.write("营业收入和利润均已披露。", meta={"doc_id": "generic"})
+    store.write("2023 年营业收入为 124.5 亿元。", meta={"doc_id": "exact"})
+
+    hits = store.search_bm25("2023 年营业收入 124.5 亿元", top_k=2)
+
+    assert hits[0][2]["doc_id"] == "exact"
+
+
+def test_fielded_bm25_prioritizes_table_row_metadata():
+    store = LexicalKnowledgeMemory(":memory:")
+    store.write(
+        "现金及现金等价物。",
+        meta={"doc_id": "generic", "row_id": "资产负债表"},
+    )
+    store.write(
+        "53,345,930",
+        meta={"doc_id": "cashflow", "row_id": "经营活动产生的现金流量净额"},
+    )
+
+    hits = store.search_bm25("经营现金流量净额", top_k=2)
+
+    assert len(hits) == 2
+    assert hits[0][2]["doc_id"] == "cashflow"
+
+
 def test_explicit_empty_doc_filter_never_means_all_documents():
     store = LexicalKnowledgeMemory(":memory:")
     store.write("营业收入为 124.5 亿元。", meta={"doc_id": "annual"})

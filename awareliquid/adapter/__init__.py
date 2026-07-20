@@ -17,6 +17,7 @@ from .qwen_client import (
 )
 from .chunker import Chunk, chunk_document
 from .compressor import CompressedContext, ExtractiveCompressor
+from .evidence_index import EvidenceNode, build_evidence_nodes
 from .hybrid import rrf_fuse
 from .schemas import AnswerResult, parse_answer, summarize_usage
 
@@ -32,6 +33,8 @@ __all__ = [
     "build_chat_client",
     "Chunk",
     "chunk_document",
+    "EvidenceNode",
+    "build_evidence_nodes",
     "ExtractiveCompressor",
     "CompressedContext",
     "AnswerResult",

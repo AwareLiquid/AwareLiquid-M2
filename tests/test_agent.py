@@ -5,6 +5,9 @@ import pytest
 from awareliquid.adapter.qa_agent import (
     MemoryQAAgent,
     RetrievalConfig,
+    _missing_evidence_anchors,
+    _missing_evidence_slots,
+    _verify_calculation_draft,
     _parse_structured_answer,
 )
 from awareliquid.adapter.qwen_client import (
@@ -208,6 +211,62 @@ def test_structured_prompt_uses_relation_check_only_when_needed():
     )
     assert "matching units and periods" in relation
     assert "matching units and periods" not in ordinary
+
+
+def test_option_evidence_coverage_finds_missing_high_signal_anchors():
+    missing = _missing_evidence_anchors(
+        "2023 年营业收入是多少？",
+        "营业收入为 124.5 亿元，适用第七条但有特殊情形",
+        "[source doc=annual] 2023 年营业收入已披露。",
+    )
+    assert "124.5 亿元" in missing
+    assert "第七条" in missing
+    assert "特殊情形" in missing
+    # A connective word is not useful enough to trigger a broad supplement.
+    assert "但" not in missing
+
+
+def test_option_evidence_coverage_finds_missing_domain_slots():
+    missing = _missing_evidence_slots(
+        "比较两家公司的营业收入和经营现金流。",
+        "经营现金流更高。",
+        "2023 年营业收入已披露，但没有现金流数据。",
+    )
+    assert any("经营现金流" in item for item in missing)
+
+
+def test_evidence_coverage_supplement_is_enabled_by_default():
+    assert RetrievalConfig().evidence_coverage_supplement is True
+
+
+def test_calculation_draft_is_recomputed_with_decimal_and_invalid_values_are_dropped():
+    valid = _verify_calculation_draft(
+        '{"facts":[{"name":"premium","value":"10","unit":"万元"},'
+        '{"name":"gain","value":"2","unit":"万元"}],'
+        '"derived":[{"name":"surrender","operation":"add",'
+        '"operands":["premium","gain"],"value":"12","unit":"万元"}]}'
+    )
+    assert "derived surrender = 12万元" in valid
+
+    invalid = _verify_calculation_draft(
+        '{"facts":[{"name":"premium","value":"10"},'
+        '{"name":"gain","value":"2"}],'
+        '"derived":[{"name":"surrender","operation":"add",'
+        '"operands":["premium","gain"],"value":"11"}]}'
+    )
+    assert "derived surrender" not in invalid
+
+
+def test_calculation_draft_accepts_percentages_literals_and_forward_references():
+    verified = _verify_calculation_draft(
+        '{"facts":[{"name":"gain","value":"2"},{"name":"rate","value":"75%"}],'
+        '"derived":[{"name":"surrender","operation":"add",'
+        '"operands":["premium_after_rate","1"],"value":"2.5"},'
+        '{"name":"premium_after_rate","operation":"multiply",'
+        '"operands":["gain","rate"],"value":"1.5"}]}'
+    )
+    assert "derived premium_after_rate = 1.5" in verified
+    assert "derived surrender = 2.5" in verified
 
 
 class _RecordingStructuredClient:

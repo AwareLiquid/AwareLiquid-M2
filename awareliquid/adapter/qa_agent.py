@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .chunker import chunk_document
 from .compressor import ExtractiveCompressor
+from .evidence_index import build_evidence_nodes
 from .hybrid import rrf_fuse
 from .qwen_client import (
     ChatResult,
@@ -53,6 +55,162 @@ _OPTION_RELATION_STATE = re.compile(
     re.IGNORECASE,
 )
 _ANSWER_LINE = re.compile(r"(?:^|\n)\s*ANSWER\s*:\s*([A-Z]+)\b", re.IGNORECASE)
+_EVIDENCE_SLOT_GROUPS = (
+    ("营业收入", "营业总收入", "主营业务收入"),
+    ("归母净利润", "归属于上市公司股东的净利润"),
+    ("经营现金流", "经营活动产生的现金流量净额", "经营活动现金流量净额"),
+    ("研发投入", "研发费用", "研发投入占营业收入比例"),
+    ("现金分红", "每10股现金分红", "利润分配方案"),
+    ("一般医疗", "一般医疗保险金", "住院医疗费用"),
+    ("免赔额", "共享免赔额", "家庭共享免赔额"),
+    ("施救费用", "施救费", "必要合理施救费用"),
+    ("除外责任", "免责", "不承担责任"),
+)
+_EVIDENCE_ANCHOR = re.compile(
+    r"(?:19|20)\d{2}\s*年?"
+    r"|\d+(?:,\d{3})*(?:\.\d+)?\s*(?:个百分点|亿元|万元|美元|港元|bp|BP|%|％|亿|万|元)"
+    r"|第\s*[一二三四五六七八九十百\d]+\s*(?:条|章|节|款|项|个保单年度|保单年度)"
+    r"|AAA|AA\+?"
+    r"|除外|例外|但|不适用|特殊情形|免责|等待期"
+    ,
+)
+def _normalise_evidence_anchor(value: str) -> str:
+    return re.sub(r"\s+", "", str(value)).lower()
+
+
+def _missing_evidence_anchors(question: str, option: str, evidence: str) -> List[str]:
+    """Find exact, high-signal anchors from a claim missing in its evidence."""
+    anchors: List[str] = []
+    seen = set()
+    # Option anchors are the primary coverage contract.  Question anchors are
+    # added only when they are structural facts (dates, amounts, clauses, ...),
+    # not ordinary connective words such as ``但``.  This keeps a supplement
+    # query targeted instead of turning every multi-choice question into a
+    # broad second retrieval pass.
+    for match in _EVIDENCE_ANCHOR.finditer(f"{option} {question}"):
+        anchor = match.group(0).strip()
+        key = _normalise_evidence_anchor(anchor)
+        if key and key not in seen and len(key) > 1:
+            seen.add(key)
+            anchors.append(anchor)
+    evidence_text = _normalise_evidence_anchor(evidence)
+    return [anchor for anchor in anchors if _normalise_evidence_anchor(anchor) not in evidence_text]
+
+
+def _missing_evidence_slots(question: str, option: str, evidence: str) -> List[str]:
+    source = f"{question} {option}"
+    normalized = _normalise_evidence_anchor(evidence)
+    missing = []
+    for group in _EVIDENCE_SLOT_GROUPS:
+        if not any(term in source for term in group):
+            continue
+        if any(_normalise_evidence_anchor(term) in normalized for term in group):
+            continue
+        missing.append(" ".join(group))
+    return missing
+
+
+def _verify_calculation_draft(raw: str) -> str:
+    """Validate a Qwen calculation ledger with local Decimal arithmetic.
+
+    The model may extract facts and propose derived values, but it is not
+    trusted to perform the arithmetic.  Invalid or incomplete ledgers are
+    discarded instead of being repeated as authoritative evidence.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+
+    def parse_decimal(value):
+        if isinstance(value, bool) or value is None:
+            raise ValueError("invalid numeric value")
+        text = str(value).strip().replace(",", "")
+        if text.endswith("%"):
+            return Decimal(text[:-1]) / Decimal("100")
+        return Decimal(text)
+
+    values = {}
+    rendered = []
+    for item in payload.get("facts", []):
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        value = item.get("value")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        try:
+            parsed = parse_decimal(value)
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        if not parsed.is_finite():
+            continue
+        key = name.strip()
+        values[key] = parsed
+        unit = item.get("unit") or ""
+        rendered.append(f"- fact {key} = {parsed}{unit}")
+
+    operations = {"add", "subtract", "multiply", "divide"}
+    pending = [item for item in payload.get("derived", []) if isinstance(item, dict)]
+    while pending:
+        progressed = False
+        remaining = []
+        for item in pending:
+            name = item.get("name")
+            operation = item.get("operation")
+            operands = item.get("operands")
+            reported = item.get("value")
+            if (
+                not isinstance(name, str)
+                or not name.strip()
+                or operation not in operations
+                or not isinstance(operands, list)
+                or not operands
+            ):
+                continue
+            if operation in {"subtract", "divide"} and len(operands) != 2:
+                continue
+            try:
+                operand_values = [
+                    values[ref] if isinstance(ref, str) and ref in values else parse_decimal(ref)
+                    for ref in operands
+                ]
+                if operation == "add":
+                    computed = sum(operand_values, Decimal("0"))
+                elif operation == "subtract":
+                    computed = operand_values[0] - operand_values[1]
+                elif operation == "multiply":
+                    computed = Decimal("1")
+                    for value in operand_values:
+                        computed *= value
+                else:
+                    if operand_values[1] == 0:
+                        continue
+                    computed = operand_values[0] / operand_values[1]
+                reported_decimal = parse_decimal(reported)
+            except (InvalidOperation, ValueError, TypeError, ZeroDivisionError):
+                remaining.append(item)
+                continue
+            if not reported_decimal.is_finite() or reported_decimal != computed:
+                continue
+            key = name.strip()
+            values[key] = computed
+            unit = item.get("unit") or ""
+            rendered.append(
+                f"- derived {key} = {computed}{unit} "
+                f"({operation}: {', '.join(str(ref) for ref in operands)})"
+            )
+            progressed = True
+        if not progressed:
+            break
+        pending = remaining
+
+    return "\n".join(rendered)
 
 
 def _detect_anchors(question: str) -> List[str]:
@@ -130,6 +288,33 @@ def _is_canonical_answer(answer: str, qtype: str, num_options: int) -> bool:
     return bool(answer) and set(answer) <= allowed and answer == "".join(sorted(set(answer)))
 
 
+def _merge_evidence_blocks(contexts: Sequence[str], max_chars: int) -> str:
+    """Deduplicate source blocks and enforce one final context budget."""
+    if max_chars <= 0:
+        return ""
+    blocks: List[str] = []
+    seen = set()
+    used = 0
+    for context in contexts:
+        for block in (part.strip() for part in (context or "").split("\n\n")):
+            if not block:
+                continue
+            key = re.sub(r"\s+", " ", block).strip().lower()
+            if key in seen:
+                continue
+            separator = 2 if blocks else 0
+            remaining = max_chars - used - separator
+            if remaining <= 0:
+                return "\n\n".join(blocks)
+            seen.add(key)
+            selected = block[:remaining]
+            blocks.append(selected)
+            used += separator + len(selected)
+            if len(selected) < len(block):
+                return "\n\n".join(blocks)
+    return "\n\n".join(blocks)
+
+
 @dataclass
 class RetrievalConfig:
     # ``hybrid`` preserves the original research path. ``lexical`` is the
@@ -167,6 +352,17 @@ class RetrievalConfig:
     calculation_judgement_max_tokens: int = 512
     option_evidence_budget: int = 900
     option_evidence_per_document: bool = True
+    # Deterministic, option-local gap filling.  It is deliberately enabled by
+    # default: it changes only local retrieval, never the Qwen answer policy.
+    evidence_coverage_supplement: bool = True
+    evidence_coverage_max_anchors: int = 4
+    evidence_coverage_supplement_budget: int = 900
+    structure_index: bool = True
+    structure_neighbor_expansion: bool = True
+    structure_neighbor_cap: int = 2
+    answer_context_budget: int = 12_000
+    adaptive_multi_review: bool = False
+    adaptive_multi_review_max_tokens: int = 128
 
 
 class MemoryQAAgent:
@@ -247,21 +443,25 @@ class MemoryQAAgent:
 
     # -- ingest -----------------------------------------------------------
     def ingest_document(self, doc_id: str, text: str) -> int:
-        """Chunk, embed and store one document. Returns the number of chunks."""
-        chunks = chunk_document(
+        """Ingest exact text with deterministic structure metadata."""
+        nodes = build_evidence_nodes(
             doc_id,
             text,
             max_chars=self.config.max_chars,
             overlap_chars=self.config.overlap_chars,
         )
-        for ch in chunks:
+        for node in nodes:
+            meta = node.as_meta() if self.config.structure_index else {
+                "doc_id": node.doc_id,
+                "chunk_idx": node.chunk_idx,
+            }
             if self.config.retrieval_backend == "lexical":
-                self.store.write(ch.text, meta=ch.as_meta())
+                self.store.write(node.content, meta=meta)
             else:
-                key = self.encoder.encode(ch.text, is_query=False)
-                self.store.write(key, ch.text, meta=ch.as_meta())
+                key = self.encoder.encode(node.content, is_query=False)
+                self.store.write(key, node.content, meta=meta)
         self._ingested_docs.add(str(doc_id))
-        return len(chunks)
+        return len(nodes)
 
     def ingest_documents(self, docs: Dict[str, str]) -> int:
         """Ingest a ``{doc_id: text}`` mapping. Returns total chunks stored."""
@@ -320,10 +520,30 @@ class MemoryQAAgent:
             source = meta.get("doc_id", "unknown")
             chunk = meta.get("chunk_idx")
             suffix = f" chunk={chunk}" if chunk is not None else ""
+            page = meta.get("page")
+            if page is not None:
+                suffix += f" page={page}"
+            section = meta.get("section")
+            if section:
+                suffix += f" section={section}"
+            clause = meta.get("clause_id")
+            if clause:
+                suffix += f" clause={clause}"
         else:
             source = "unknown"
             suffix = ""
         return f"[source doc_id={source}{suffix}]\n{content}"
+
+    def _expand_structural_hits(self, hits):
+        if (
+            self.config.retrieval_backend != "lexical"
+            or not self.config.structure_index
+            or not self.config.structure_neighbor_expansion
+        ):
+            return hits
+        return self.store.expand_neighbors(
+            hits, max_extra=self.config.structure_neighbor_cap
+        )
 
     def _locate_documents(
         self, query_text: str, options: Optional[Sequence[str]]
@@ -415,7 +635,12 @@ class MemoryQAAgent:
             # sides), and one option-boosted query per option (for fact-matching
             # mcq, where the answer sentence echoes an option's wording).
             subqueries = [question]
-            anchor_queries = [f"{a} {question}" for a in _detect_anchors(question)]
+            # Keep the temporal channel narrowly anchored.  Adding the full
+            # question here turns a precise year/quarter lookup into a large
+            # OR query whose tied BM25 results can crowd out the very operand
+            # this channel exists to protect.  The question and option
+            # channels below still provide semantic/lexical context.
+            anchor_queries = list(_detect_anchors(question))
             subqueries += anchor_queries
             subqueries += [f"{question} {o}" for o in (options or [])]
             best: Dict[int, Tuple[float, str, Any]] = {}
@@ -455,7 +680,15 @@ class MemoryQAAgent:
                 rid for rid, _value in ranked if rid not in set(required_ids)
             ]
             selected = [best[rid] for rid in selected_ids[:cap]]
-            return [self._format_passage(content, meta) for _score, content, meta in selected]
+            selected_hits = [
+                (rid, content, meta)
+                for rid, (_score, content, meta) in zip(selected_ids, selected)
+            ]
+            selected_hits = self._expand_structural_hits(selected_hits)
+            return [
+                self._format_passage(content, meta)
+                for _rid, content, meta in selected_hits
+            ]
 
         enriched = self._enrich(question, options)
         hits = (
@@ -463,6 +696,7 @@ class MemoryQAAgent:
             if self.config.retrieval_backend == "lexical"
             else self._hybrid_hits(enriched, allowed, self.config.top_k)
         )
+        hits = self._expand_structural_hits(hits)
         return [self._format_passage(content, meta) for _rid, content, meta in hits]
 
     # -- answer -----------------------------------------------------------
@@ -522,11 +756,39 @@ class MemoryQAAgent:
                 option_passages,
                 coverage_queries=[question, option],
             )
+            option_text = option_compressed.text
+            if self.config.evidence_coverage_supplement:
+                missing_targets = [
+                    *_missing_evidence_anchors(question, option, option_text),
+                    *_missing_evidence_slots(question, option, option_text),
+                ][: self.config.evidence_coverage_max_anchors]
+                supplement_texts = []
+                for target in missing_targets:
+                    # Each supplement is a narrow lexical query.  It does not
+                    # alter the primary ranking and never invokes Qwen.
+                    supplement_passages = self.retrieve(
+                        target,
+                        doc_ids=evidence_scope if evidence_scope else doc_ids,
+                        split="A" if evidence_scope else split,
+                    )
+                    supplement = ExtractiveCompressor(
+                        budget_chars=self.config.evidence_coverage_supplement_budget
+                    ).compress(
+                        target,
+                        supplement_passages,
+                        coverage_queries=[target],
+                    )
+                    if supplement.text:
+                        supplement_texts.append(supplement.text)
+                if supplement_texts:
+                    option_text = "\n".join([option_text, *supplement_texts])
             option_evidence.append(
                 f"Option {label} evidence:\n"
-                + (option_compressed.text or "(no option-specific evidence)")
+                + (option_text or "(no option-specific evidence)")
             )
-        context = context + "\n\n" + "\n\n".join(option_evidence)
+        context = _merge_evidence_blocks(
+            [context, *option_evidence], self.config.answer_context_budget
+        )
         audit_text = ""
         audit_usage = TokenUsage()
         if self.config.option_audit or (
@@ -577,7 +839,7 @@ class MemoryQAAgent:
                 temperature=0.0,
                 max_tokens=self.config.calculation_judgement_max_tokens,
             )
-            calculation_draft = calculation_result.text.strip()
+            calculation_draft = _verify_calculation_draft(calculation_result.text)
             calculation_usage = calculation_result.usage
         user_prompt = (
             self._build_structured_prompt(
@@ -663,9 +925,37 @@ class MemoryQAAgent:
                     text=result.text,
                     usage=result.usage + retry_usage,
                 )
+        review_usage = TokenUsage()
+        if (
+            self.config.adaptive_multi_review
+            and qtype == "multi"
+            and len(answer) <= 1
+        ):
+            review_result = self.chat_client.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": _STRUCTURED_SYSTEM_PROMPT,
+                    },
+                    {
+                        "role": "user",
+                        "content": self._build_multi_review_prompt(
+                            question, options, context, answer
+                        ),
+                    },
+                ],
+                temperature=0.0,
+                max_tokens=self.config.adaptive_multi_review_max_tokens,
+            )
+            review_usage = review_result.usage
+            reviewed = _parse_structured_answer(
+                review_result.text, qtype, len(options) or 4
+            )
+            if _is_canonical_answer(reviewed, qtype, len(options) or 4):
+                answer = reviewed
         return AnswerResult(
             qid=str(qid), answer=answer, qtype=qtype,
-            usage=audit_usage + calculation_usage + result.usage,
+            usage=audit_usage + calculation_usage + result.usage + review_usage,
         )
 
     @staticmethod
@@ -777,11 +1067,15 @@ class MemoryQAAgent:
         return (
             f"Context:\n{context or '(no relevant context retrieved)'}\n\n"
             f"Question: {question}\nOptions:\n{opt_lines}\n\n"
-            "Do not choose an option. Extract only numerical inputs explicitly stated in "
-            "the question, formulas or rates explicitly stated in Context, and calculate "
-            "each named amount with exact decimal arithmetic. Do not use numbers from the "
-            "answer options as inputs and do not invent fees or rates. Output a compact "
-            "calculation draft with inputs, formulas, results, and uncertainties."
+            "Do not choose an option. Return JSON only with this shape: "
+            '{"facts":[{"name":"fact name","value":"12.5","unit":"万元"}],'
+            '"derived":[{"name":"result name","operation":"add",'
+            '"operands":["fact name"],"value":"12.5","unit":"万元"}]}.'
+            "Extract only numerical inputs explicitly stated in the question and "
+            "formulas or rates explicitly stated in Context. Use only add, subtract, "
+            "multiply, or divide. Do not use numbers from answer options as inputs, "
+            "do not invent fees or rates, and do not include a derived value unless "
+            "its operands are present in facts."
         )
 
     @staticmethod
@@ -796,4 +1090,28 @@ class MemoryQAAgent:
             f"Options:\n{opt_lines}\n\n"
             f"Answer format: {qtype}.\n"
             "Audit each option independently."
+        )
+
+    @staticmethod
+    def _build_multi_review_prompt(
+        question: str,
+        options: Sequence[str],
+        context: str,
+        initial_answer: str,
+    ) -> str:
+        labels = [chr(ord("A") + i) for i in range(len(options))]
+        opt_lines = "\n".join(
+            f"{label}) {option}" for label, option in zip(labels, options)
+        )
+        return (
+            f"Initial answer: {initial_answer or '(empty)'}\n"
+            f"Question: {question}\nOptions:\n{opt_lines}\n\n"
+            f"Context:\n{context or '(no relevant context retrieved)'}\n\n"
+            "The initial answer may have omitted correct options. Re-evaluate every "
+            "option independently against the context, especially options omitted from "
+            "the initial answer. A multi-choice option is SUPPORTED only when its complete "
+            "claim is directly entailed; do not treat silence as REFUTED. Output exactly "
+            "one line per option as LETTER=SUPPORTED, LETTER=REFUTED, or "
+            "LETTER=INSUFFICIENT, followed by ANSWER:LETTERS containing all and only "
+            "SUPPORTED options. Do not explain."
         )
