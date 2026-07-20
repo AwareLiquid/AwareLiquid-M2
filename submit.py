@@ -3,8 +3,7 @@
 Reads a document set and a question file, runs the full memory-adapter pipeline
 per question, and writes the submission CSV:
 
-    header : qid,answer,prompt_tokens,completion_tokens,total_tokens
-    row 1  : summary,,<sum prompt>,<sum completion>,<sum total>
+    row 1  : summary,<budget>,<used>,<unused>
     rows   : one per question, answer normalised per type
 
 Answer formatting (handled by the agent's parser):
@@ -26,14 +25,21 @@ model; otherwise the offline mock backend runs so the pipeline is testable.
 from __future__ import annotations
 
 import argparse
-import csv
+import hashlib
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
-from awareliquid import MemoryQAAgent
+from awareliquid import MemoryQAAgent, RetrievalConfig
+from awareliquid.adapter.afac_contract import (
+    SubmissionAnswer,
+    ParsedQuestion,
+    parse_questions,
+    render_submission_csv,
+)
 
 # Map the input's answer_format values to the internal question type.
 _QTYPE = {
@@ -42,6 +48,12 @@ _QTYPE = {
     "tf": "tf", "judgment": "tf", "judgement": "tf", "boolean": "tf",
     "true_false": "tf", "判断": "tf",
 }
+
+
+def render_csv(questions: Sequence[ParsedQuestion], answers: Sequence[SubmissionAnswer]) -> str:
+    """Render only a fully validated official five-column CSV."""
+
+    return render_submission_csv(questions, answers)
 
 
 def load_docs(path: str) -> Dict[str, str]:
@@ -75,59 +87,164 @@ def options_to_list(options) -> List[str]:
     return [str(o) for o in (options or [])]
 
 
+def _sha256_json(value) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace *path* atomically after the complete contents are written."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _checkpoint_payload(question_payloads, docs, retrieval_backend, answers):
+    return {
+        "version": 1,
+        "questions_sha256": _sha256_json(question_payloads),
+        "docs_sha256": _sha256_json(docs),
+        "retrieval_backend": retrieval_backend,
+        "qids": [str(item["qid"]) for item in question_payloads],
+        "answers": [
+            {
+                "qid": item.qid,
+                "answer": item.answer,
+                "prompt_tokens": item.prompt_tokens,
+                "completion_tokens": item.completion_tokens,
+                "total_tokens": item.total_tokens,
+            }
+            for item in answers
+        ],
+    }
+
+
+def _load_checkpoint(path, question_payloads, questions, docs, retrieval_backend):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    expected_qids = [question.qid for question in questions]
+    if data.get("version") != 1:
+        raise ValueError(f"unsupported checkpoint version in {path}")
+    if data.get("questions_sha256") != _sha256_json(question_payloads):
+        raise ValueError("checkpoint question set does not match current input; use --fresh")
+    if data.get("docs_sha256") != _sha256_json(docs):
+        raise ValueError("checkpoint documents do not match current input; use --fresh")
+    if data.get("retrieval_backend") != retrieval_backend:
+        raise ValueError("checkpoint retrieval backend does not match current run; use --fresh")
+    if data.get("qids") != expected_qids:
+        raise ValueError("checkpoint qid order does not match current input; use --fresh")
+    raw_answers = data.get("answers", [])
+    if len(raw_answers) > len(expected_qids):
+        raise ValueError("checkpoint contains more answers than the question set")
+    answers = [SubmissionAnswer(**item) for item in raw_answers]
+    if [item.qid for item in answers] != expected_qids[:len(answers)]:
+        raise ValueError("checkpoint answers must be a contiguous prefix in question order")
+    if answers:
+        render_csv(questions[:len(answers)], answers)
+    return answers
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build a choice-question submission CSV.")
     ap.add_argument("--questions", required=True, help="JSONL/JSON question file")
     ap.add_argument("--docs", required=True, help="docs JSON or directory")
     ap.add_argument("--out", default="submission.csv", help="output CSV path")
+    ap.add_argument(
+        "--checkpoint",
+        default=None,
+        help="atomic per-question checkpoint path (default: <out>.checkpoint.json)",
+    )
+    ap.add_argument(
+        "--fresh",
+        action="store_true",
+        help="ignore an existing checkpoint and start the ordered run from zero",
+    )
+    ap.add_argument(
+        "--no-checkpoint",
+        action="store_true",
+        help="disable per-question checkpointing for an ephemeral run",
+    )
     ap.add_argument("--limit", type=int, default=0, help="only first N questions (0=all)")
+    ap.add_argument(
+        "--retrieval-backend",
+        choices=("lexical", "hybrid"),
+        default="lexical",
+        help="local retrieval backend (default: lexical; hybrid needs an encoder)",
+    )
     args = ap.parse_args()
-
-    has_key = bool(os.environ.get("AWARELIQUID_LLM_API_KEY") or os.environ.get("DASHSCOPE_API_KEY"))
-    if not has_key and os.environ.get("AWARELIQUID_LLM_BACKEND") != "mock":
-        print("WARNING: no Qwen API key set — running the offline MOCK backend. "
-              "Answers will not be real. Set AWARELIQUID_LLM_API_KEY for a real run.",
-              file=sys.stderr)
-
     docs = load_docs(args.docs)
-    questions = load_questions(args.questions)
+    question_payloads = load_questions(args.questions)
     if args.limit:
-        questions = questions[: args.limit]
+        question_payloads = question_payloads[: args.limit]
+    questions = parse_questions(question_payloads)
     print(f"loaded {len(docs)} docs, {len(questions)} questions", file=sys.stderr)
 
-    agent = MemoryQAAgent()
+    checkpoint_path = None
+    if not args.no_checkpoint:
+        checkpoint_path = Path(args.checkpoint or f"{args.out}.checkpoint.json")
+
+    agent = MemoryQAAgent(
+        config=RetrievalConfig(retrieval_backend=args.retrieval_backend)
+    )
     agent.ingest_documents(docs)
 
-    rows: List[list] = []
-    tp = tc = tt = 0
-    for i, q in enumerate(questions, 1):
-        qid = str(q.get("qid") or q.get("id") or i)
-        fmt = str(q.get("answer_format") or q.get("qtype") or "mcq").lower()
-        qtype = _QTYPE.get(fmt, "mcq")
-        options = options_to_list(q.get("options"))
-        doc_ids = q.get("doc_ids")
+    answers: List[SubmissionAnswer] = []
+    if checkpoint_path and checkpoint_path.exists() and not args.fresh:
+        answers = _load_checkpoint(
+            checkpoint_path, question_payloads, questions, docs, args.retrieval_backend
+        )
+        print(f"resuming after {len(answers)}/{len(questions)} committed questions", file=sys.stderr)
+
+    for i, parsed in enumerate(questions[len(answers):], len(answers) + 1):
+        qid = parsed.qid
+        qtype = parsed.answer_format
+        options = options_to_list(parsed.options)
         res = agent.answer_question(
-            qid=qid, question=str(q.get("question", "")),
-            options=options, qtype=qtype, doc_ids=doc_ids,
+            qid=qid, question=parsed.question,
+            options=options, qtype=qtype, doc_ids=parsed.doc_ids,
+            split=parsed.split,
         )
         u = res.usage
-        tp += u.prompt_tokens
-        tc += u.completion_tokens
-        tt += u.total_tokens
-        rows.append([qid, res.answer, u.prompt_tokens, u.completion_tokens, u.total_tokens])
+        answers.append(
+            SubmissionAnswer(
+                qid,
+                res.answer,
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.total_tokens,
+            )
+        )
+        if checkpoint_path:
+            _atomic_write_text(
+                checkpoint_path,
+                json.dumps(
+                    _checkpoint_payload(question_payloads, docs, args.retrieval_backend, answers),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+            print(f"  committed {i}/{len(questions)} ({qid})", file=sys.stderr)
         if i % 50 == 0:
-            print(f"  answered {i}/{len(questions)} (tokens so far: {tt})", file=sys.stderr)
+            print(f"  answered {i}/{len(questions)} (tokens so far: {sum(a.total_tokens for a in answers)})", file=sys.stderr)
 
-    with open(args.out, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["qid", "answer", "prompt_tokens", "completion_tokens", "total_tokens"])
-        w.writerow(["summary", "", tp, tc, tt])
-        w.writerows(rows)
+    _atomic_write_text(Path(args.out), render_csv(questions, answers))
 
-    empty = sum(1 for r in rows if not r[1])
-    print(f"wrote {len(rows)} answers -> {args.out}", file=sys.stderr)
+    tp = sum(a.prompt_tokens for a in answers)
+    tc = sum(a.completion_tokens for a in answers)
+    tt = sum(a.total_tokens for a in answers)
+    print(f"wrote {len(answers)} answers -> {args.out}", file=sys.stderr)
     print(f"total tokens: {tt} (prompt {tp} + completion {tc}); "
-          f"avg {tt/max(1,len(rows)):.0f}/q; {empty} empty answer(s)", file=sys.stderr)
+          f"avg {tt/max(1,len(answers)):.0f}/q", file=sys.stderr)
     return 0
 
 

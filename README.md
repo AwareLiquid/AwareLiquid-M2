@@ -112,6 +112,12 @@ python submit.py --questions examples/sample_questions.jsonl \
                  --docs examples/sample_docs.json --out submission.csv
 ```
 
+Batch runs are atomic and ordered by default: after each completed question,
+`<out>.checkpoint.json` is replaced atomically. Re-running the command resumes
+from the first uncommitted question and validates the question/document
+fingerprints before continuing. Use `--checkpoint PATH` to choose the file,
+`--fresh` to intentionally restart, or `--no-checkpoint` for an ephemeral run.
+
 Questions are JSONL/JSON (`qid`, `question`, `options` as a `{letter: text}` dict
 or a list, `answer_format`, `doc_ids`); docs are a `{doc_id: text}` JSON or a
 directory of `<doc_id>.txt` files. To score a labelled set end-to-end (accuracy +
@@ -127,11 +133,15 @@ run is always known.
 ## Tests
 
 ```bash
-pytest
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+./scripts/test.sh
 ```
 
-The suite runs offline (mock backend, in-memory store) and covers chunking,
-compression, answer parsing and the end-to-end agent loop.
+The suite runs offline with the deterministic local mock backend and in-memory
+stores; it does not require a Qwen API key or a GPU. The `lexical` retrieval
+backend uses SQLite/FTS5 and is the lightweight path for local testing. The
+original `hybrid` backend remains available for dense-retrieval experiments.
 
 ## Validation
 
