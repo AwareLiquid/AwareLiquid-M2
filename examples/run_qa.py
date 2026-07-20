@@ -8,7 +8,7 @@ Set AWARELIQUID_LLM_API_KEY (or DASHSCOPE_API_KEY) to answer with a real Qwen
 model instead.
 """
 
-from awareliquid import MemoryQAAgent, summarize_usage
+from awareliquid import MemoryQAAgent, RetrievalConfig, summarize_usage
 
 # A tiny stand-in "financial report". Real documents are far longer; the adapter
 # is designed for reports that do not fit in a single context window.
@@ -22,7 +22,7 @@ REPORT = """
 
 
 def main() -> None:
-    agent = MemoryQAAgent()
+    agent = MemoryQAAgent(config=RetrievalConfig(retrieval_backend="lexical"))
     n_chunks = agent.ingest_document("annual-2023", REPORT)
     print(f"ingested annual-2023 into {n_chunks} chunk(s)\n")
 

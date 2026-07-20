@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 
-from awareliquid import MemoryQAAgent, summarize_usage
+from awareliquid import MemoryQAAgent, RetrievalConfig, summarize_usage
 
 # Official per-run token budget for the full test set (used only to illustrate
 # the efficiency term; on this tiny demo set efficiency is ~1.0).
@@ -77,7 +77,7 @@ def main() -> None:
         f"REAL Qwen ({os.environ.get('AWARELIQUID_LLM_MODEL', 'qwen-plus')})"
     print(f"=== accuracy evaluation — backend: {mode} ===\n")
 
-    agent = MemoryQAAgent()
+    agent = MemoryQAAgent(config=RetrievalConfig(retrieval_backend="lexical"))
     agent.ingest_documents(DOCS)
 
     results, correct = [], 0
