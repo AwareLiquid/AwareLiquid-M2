@@ -37,8 +37,8 @@ at — reading a short, relevant context and answering — and nothing else.
 |-------|--------|--------------|
 | **Chunk** | `adapter/chunker.py` | Split documents on sentence/paragraph boundaries into overlapping passages (language-agnostic, handles Chinese). |
 | **Embed** | `memory/encoder.py` | Lazy, L2-normalised multilingual sentence embedder (`intfloat/multilingual-e5-small` by default; `bge` selectable). |
-| **Store** | `memory/knowledge_store.py` | SQLite-backed vector store (cosine) **plus an FTS5/BM25 lexical index**, content-addressable, with an anisotropy-robust centering option and an optional LRU cap. |
-| **Retrieve** | `adapter/qa_agent.py` + `adapter/hybrid.py` | **Hybrid retrieval**: dense (e5 cosine) and lexical (BM25) channels fused with Reciprocal Rank Fusion, restricted to a caller-supplied document set. Dense captures meaning; BM25 captures exact tokens (rates, rating codes, `FY2023`). Falls back to dense-only when FTS5 is unavailable. |
+| **Store** | `memory/lexical_store.py` | SQLite-backed FTS5/BM25 lexical index with deterministic source metadata and strict document filters. The legacy vector store remains research-only. |
+| **Retrieve** | `adapter/qa_agent.py` + `adapter/evidence_index.py` | Competition-safe retrieval: structural source nodes, BM25, exact numeric/clause anchors, bounded neighbor expansion, and source-linked evidence deduplication. |
 | **Compress** | `adapter/compressor.py` | Extractive, **LLM-free** sentence selection under a character budget — keeps sentences by question overlap plus a salience bonus for numbers, %, currency and dates. Compression itself costs **zero** generation tokens. |
 | **Answer** | `adapter/qwen_client.py` | OpenAI-compatible Qwen chat call with exact per-call token accounting. |
 
@@ -97,10 +97,9 @@ python examples/run_qa.py
 ```
 
 Retrieval and compression are tunable via `RetrievalConfig` (chunk size, overlap,
-`top_k`, compression budget, answer-token cap, hybrid-retrieval settings
-(`hybrid`, `rrf_k`, `rrf_pool`, dense/sparse weights), and optional multi-query
-retrieval (`multi_query`) that issues a sub-query per temporal operand and option
-and unions the results — for cross-document comparison / computation questions).
+`top_k`, compression budget, answer-token cap, structural evidence settings, and
+optional multi-query retrieval). The formal `submit.py` entry point is lexical/BM25
+only; the legacy dense/hybrid path is not part of the competition workflow.
 
 ## Batch answering
 
@@ -140,8 +139,8 @@ python3 -m venv .venv
 
 The suite runs offline with the deterministic local mock backend and in-memory
 stores; it does not require a Qwen API key or a GPU. The `lexical` retrieval
-backend uses SQLite/FTS5 and is the lightweight path for local testing. The
-original `hybrid` backend remains available for dense-retrieval experiments.
+backend uses SQLite/FTS5 and is the only backend accepted by formal submission.
+The original `hybrid` backend remains available for isolated research tests only.
 
 ## Validation
 
