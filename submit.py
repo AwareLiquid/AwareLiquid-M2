@@ -18,8 +18,8 @@ Input formats (flexible):
     --questions  JSONL or a JSON array; each item: qid, question, options
                  (dict {letter: text} or list), answer_format, doc_ids.
 
-Set AWARELIQUID_LLM_API_KEY (+ AWARELIQUID_LLM_MODEL) to answer with a real Qwen
-model; otherwise the offline mock backend runs so the pipeline is testable.
+Formal submission requires AWARELIQUID_LLM_API_KEY and a real Qwen model.  The
+offline mock backend is intentionally unavailable from this entry point.
 """
 
 from __future__ import annotations
@@ -177,9 +177,9 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="only first N questions (0=all)")
     ap.add_argument(
         "--retrieval-backend",
-        choices=("lexical", "hybrid"),
+        choices=("lexical",),
         default="lexical",
-        help="local retrieval backend (default: lexical; hybrid needs an encoder)",
+        help="formal submission retrieval backend (lexical/BM25 only)",
     )
     args = ap.parse_args()
     docs = load_docs(args.docs)
@@ -193,8 +193,19 @@ def main() -> int:
     if not args.no_checkpoint:
         checkpoint_path = Path(args.checkpoint or f"{args.out}.checkpoint.json")
 
+    formal_run_id = os.environ.get("AWARELIQUID_FORMAL_RUN_ID") or (
+        f"afac-submit-{_sha256_json(question_payloads)[:16]}"
+    )
+    formal_ledger_path = os.environ.get("AWARELIQUID_FORMAL_LEDGER_PATH") or (
+        f"{args.out}.usage.json"
+    )
     agent = MemoryQAAgent(
-        config=RetrievalConfig(retrieval_backend=args.retrieval_backend)
+        config=RetrievalConfig(
+            retrieval_backend=args.retrieval_backend,
+            competition_mode=True,
+            formal_run_id=formal_run_id,
+            formal_ledger_path=formal_ledger_path,
+        )
     )
     agent.ingest_documents(docs)
 

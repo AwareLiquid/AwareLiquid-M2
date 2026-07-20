@@ -78,6 +78,21 @@ def test_build_respects_explicit_mock(monkeypatch):
     assert isinstance(build_chat_client(test_mode=True), MockChatClient)
 
 
+def test_formal_network_requires_explicit_opt_in(monkeypatch, tmp_path):
+    monkeypatch.setenv("AWARELIQUID_ALLOW_FORMAL_NETWORK", "1")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: _Response(_response()),
+    )
+
+    result = _formal_client(tmp_path).chat(
+        [{"role": "user", "content": "Answer A"}], max_tokens=8
+    )
+
+    assert result.text == "A"
+    assert result.usage.total_tokens == 5
+
+
 def test_usage_ledger_reserves_reconciles_and_persists(tmp_path):
     path = tmp_path / "usage.json"
     ledger = UsageLedger(max_tokens=100, path=str(path))

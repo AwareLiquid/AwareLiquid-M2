@@ -12,6 +12,8 @@ Configuration is entirely by environment variable so nothing is hard-coded:
     AWARELIQUID_LLM_BASE_URL  OpenAI-compatible base URL
                               (default DashScope compatible-mode endpoint)
     AWARELIQUID_LLM_MODEL     model id             (default "qwen-plus")
+    AWARELIQUID_ALLOW_FORMAL_NETWORK=1 explicitly enables formal Qwen egress;
+                              the default is deny.
 
 Mock is available only by explicit test-only selection. Formal execution never
 falls back to a mock client or a different transport.
@@ -45,12 +47,9 @@ DEFAULT_TOKEN_BUDGET = 5_000_000
 _FORMAL_LEDGER_PATHS: Dict[str, str] = {}
 _FORMAL_LEDGER_PATHS_LOCK = threading.RLock()
 
-# A2 is an offline verification phase. Formal mode remains fully configured and
-# validated, but it must not be able to emit a request in this process. Keep the
-# deny decision adjacent to the only transport implementation so a future
-# execution phase has one explicit place to change after its contract permits
-# egress.
-_FORMAL_NETWORK_ENABLED = False
+# Formal transport is deny-by-default. A real execution environment must opt in
+# explicitly; all provider, model, endpoint, and token-ledger checks still run.
+_FORMAL_NETWORK_ENV = "AWARELIQUID_ALLOW_FORMAL_NETWORK"
 _ALLOWED_QWEN_MODELS = {
     "qwen-plus", "qwen-turbo", "qwen-max", "qwen-long",
     "qwen3.6-plus",
@@ -521,7 +520,7 @@ def _bind_formal_ledger_path(run_id: str, ledger_path: str) -> None:
 
 def _deny_formal_network_transport() -> None:
     """Fail before payload, authorization header, or urllib transport exists."""
-    if not _FORMAL_NETWORK_ENABLED:
+    if os.environ.get(_FORMAL_NETWORK_ENV, "0") != "1":
         raise RuntimeError("formal Qwen network transport is denied in this offline phase")
 
 
