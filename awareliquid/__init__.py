@@ -33,6 +33,7 @@ from .adapter import (
     summarize_usage,
 )
 from .memory import (
+    LexicalKnowledgeMemory,
     PersistentKnowledgeMemory,
     SentenceEncoder,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "summarize_usage",
     "build_chat_client",
     "PersistentKnowledgeMemory",
+    "LexicalKnowledgeMemory",
     "SentenceEncoder",
     "__version__",
 ]

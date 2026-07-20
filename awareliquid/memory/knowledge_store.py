@@ -268,9 +268,12 @@ class PersistentKnowledgeMemory:
         # Restrict the candidate set to the given documents BEFORE scoring, so
         # ranking (and centering) happen within the allowed set rather than
         # globally-then-filtered -- which would drop allowed chunks that rank
-        # below the global top-k. An empty/None list means "all documents".
+        # below the global top-k. None means "all documents"; an explicit empty
+        # list means "no documents".
         with self._lock:
-            if doc_ids:
+            if doc_ids is not None and not doc_ids:
+                return []
+            if doc_ids is not None:
                 placeholders = ",".join("?" * len(doc_ids))
                 rows = self._conn.execute(
                     f"SELECT id, key_vec, content, meta FROM knowledge "
@@ -369,7 +372,9 @@ class PersistentKnowledgeMemory:
             return []
         sql = "SELECT rowid, content FROM knowledge_fts WHERE knowledge_fts MATCH ?"
         params: List[Any] = [match]
-        if doc_ids:
+        if doc_ids is not None and not doc_ids:
+            return []
+        if doc_ids is not None:
             placeholders = ",".join("?" * len(doc_ids))
             sql += f" AND doc_id IN ({placeholders})"
             params += [str(d) for d in doc_ids]
@@ -398,6 +403,20 @@ class PersistentKnowledgeMemory:
     def fts_enabled(self) -> bool:
         """Whether the lexical (FTS5/BM25) channel is available in this build."""
         return self._fts_enabled
+
+    def available_doc_ids(self) -> List[str]:
+        """Return document ids currently represented in the store."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT doc_id FROM knowledge "
+                "WHERE doc_id IS NOT NULL ORDER BY doc_id"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def has_doc_ids(self, doc_ids: Sequence[str]) -> bool:
+        """Return whether every requested document id exists in the store."""
+        wanted = {str(doc_id) for doc_id in doc_ids}
+        return wanted.issubset(set(self.available_doc_ids()))
 
     # ------------------------------------------------------------------
     # Bookkeeping

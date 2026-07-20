@@ -65,11 +65,17 @@ class CompressedContext:
 class ExtractiveCompressor:
     """Local, LLM-free sentence selection under a character budget."""
 
-    def __init__(self, budget_chars: int = 1200, salience_weight: float = 0.5):
+    def __init__(
+        self,
+        budget_chars: int = 1200,
+        salience_weight: float = 0.5,
+        ensure_passage_coverage: bool = True,
+    ):
         if budget_chars <= 0:
             raise ValueError(f"budget_chars must be positive, got {budget_chars}")
         self.budget_chars = int(budget_chars)
         self.salience_weight = float(salience_weight)
+        self.ensure_passage_coverage = bool(ensure_passage_coverage)
 
     def _score_sentence(self, sent: str, q_terms: set) -> float:
         s_terms = _terms(sent)
@@ -87,28 +93,101 @@ class ExtractiveCompressor:
         salience = self.salience_weight if _SALIENT.search(sent) else 0.0
         return length_norm + salience
 
-    def compress(self, question: str, passages: Sequence[str]) -> CompressedContext:
+    def compress(
+        self,
+        question: str,
+        passages: Sequence[str],
+        coverage_queries: Sequence[str] | None = None,
+    ) -> CompressedContext:
         """Select the most relevant sentences from *passages* under the budget."""
         q_terms = _terms(question)
         # (original_index, sentence, score) across all passages, in reading order.
-        indexed: List[Tuple[int, str, float]] = []
-        for passage in passages:
+        indexed: List[Tuple[int, int, str, float]] = []
+        for passage_idx, passage in enumerate(passages):
             for sent in (p.strip() for p in _SENT_SPLIT.split(passage or "") if p.strip()):
                 idx = len(indexed)
-                indexed.append((idx, sent, self._score_sentence(sent, q_terms)))
+                indexed.append((idx, passage_idx, sent, self._score_sentence(sent, q_terms)))
 
         if not indexed:
             return CompressedContext(text="", kept_sentences=0, source_sentences=0)
 
         # Greedily take the highest-scoring sentences until the budget is spent.
-        ranked = sorted(indexed, key=lambda t: t[2], reverse=True)
+        ranked = sorted(indexed, key=lambda t: (t[3], -t[0]), reverse=True)
         chosen, used = [], 0
-        for idx, sent, score in ranked:
+
+        # A globally ranked sentence list can spend the entire budget on one
+        # highly lexical passage.  That is especially harmful for comparison
+        # and multi-choice questions, where each retrieved passage may contain
+        # a different option's evidence.  Reserve one best sentence per
+        # passage first, then use the remaining budget for normal relevance
+        # ranking.  This is document-agnostic and does not depend on answer
+        # labels or a particular benchmark domain.
+        reserved = []
+        if self.ensure_passage_coverage:
+            best_by_passage = {}
+            for item in indexed:
+                _idx, passage_idx, _sent, score = item
+                current = best_by_passage.get(passage_idx)
+                if current is None or (score, -item[0]) > (current[3], -current[0]):
+                    best_by_passage[passage_idx] = item
+            reserved = sorted(best_by_passage.values(), key=lambda t: t[0])
+
+        selected = set()
+
+        # Reserve evidence for each independent target (normally the question
+        # and each answer option).  A single enriched query can rank one option
+        # highly and starve the other options of context.  The queries are
+        # caller-provided text only; no answer labels or benchmark-specific
+        # rules are involved.
+        coverage_terms = [_terms(query) for query in (coverage_queries or (question,))]
+        for query_terms in coverage_terms:
+            if not query_terms:
+                continue
+            candidates = [
+                item for item in indexed
+                if item[2] not in selected
+            ]
+            if not candidates:
+                break
+            best = max(
+                candidates,
+                key=lambda item: (
+                    self._score_sentence(item[2], query_terms),
+                    -item[0],
+                ),
+            )
+            idx, _passage_idx, sent, _original_score = best
+            score = self._score_sentence(sent, query_terms)
+            if score <= 0 and chosen:
+                continue
+            if used + len(sent) > self.budget_chars and chosen:
+                continue
+            chosen.append((idx, sent))
+            selected.add(sent)
+            used += len(sent)
+            if used >= self.budget_chars:
+                break
+
+        for idx, passage_idx, sent, score in reserved:
+            if sent in selected:
+                continue
+            if used + len(sent) > self.budget_chars and chosen:
+                continue
+            chosen.append((idx, sent))
+            selected.add(sent)
+            used += len(sent)
+            if used >= self.budget_chars:
+                break
+
+        for idx, passage_idx, sent, score in ranked:
+            if sent in selected:
+                continue
             if score <= 0 and chosen:
                 break  # nothing relevant left to add
             if used + len(sent) > self.budget_chars and chosen:
                 continue
             chosen.append((idx, sent))
+            selected.add(sent)
             used += len(sent)
             if used >= self.budget_chars:
                 break

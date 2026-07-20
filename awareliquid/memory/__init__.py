@@ -13,8 +13,10 @@ backend through the small interfaces they expose.
 
 from .knowledge_store import PersistentKnowledgeMemory
 from .encoder import SentenceEncoder
+from .lexical_store import LexicalKnowledgeMemory
 
 __all__ = [
     "PersistentKnowledgeMemory",
     "SentenceEncoder",
+    "LexicalKnowledgeMemory",
 ]

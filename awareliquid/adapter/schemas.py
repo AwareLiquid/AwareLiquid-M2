@@ -46,6 +46,16 @@ def parse_answer(raw: str, qtype: str, num_options: int = 4) -> str:
         raise ValueError(f"unknown qtype {qtype!r}, expected one of {VALID_TYPES}")
 
     text = raw or ""
+    if qtype == "tf":
+        # Providers occasionally ignore the letter-only instruction and emit
+        # the semantic boolean.  Normalize that safe, unambiguous form before
+        # scanning prose for option letters (where the ``A`` in ``Answer``
+        # would otherwise be a tempting false positive).
+        boolean = text.strip().lower()
+        if re.fullmatch(r"(?:true|yes|正确|对)", boolean):
+            return "A"
+        if re.fullmatch(r"(?:false|no|错误|错)", boolean):
+            return "B"
     # Defence in depth (the prompt already asks for letters only): if the model
     # still prefixes reasoning, narrow to the span after an explicit answer marker
     # or, failing that, the last non-empty line -- so acronyms in the reasoning

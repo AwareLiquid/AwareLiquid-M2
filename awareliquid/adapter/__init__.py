@@ -12,6 +12,7 @@ from .qwen_client import (
     MockChatClient,
     QwenChatClient,
     TokenUsage,
+    UsageLedger,
     build_chat_client,
 )
 from .chunker import Chunk, chunk_document
@@ -27,6 +28,7 @@ __all__ = [
     "MockChatClient",
     "ChatResult",
     "TokenUsage",
+    "UsageLedger",
     "build_chat_client",
     "Chunk",
     "chunk_document",
