@@ -1,7 +1,19 @@
 """End-to-end agent loop with a fake encoder + mock chat client (offline)."""
 
-from awareliquid.adapter.qa_agent import MemoryQAAgent, RetrievalConfig
-from awareliquid.adapter.qwen_client import MockChatClient
+import pytest
+
+from awareliquid.adapter.qa_agent import (
+    MemoryQAAgent,
+    RetrievalConfig,
+    _parse_structured_answer,
+)
+from awareliquid.adapter.qwen_client import (
+    ChatResult,
+    QwenChatClient,
+    TokenUsage,
+    UsageLedger,
+    MockChatClient,
+)
 from awareliquid.memory.knowledge_store import PersistentKnowledgeMemory
 
 from conftest import FakeEncoder
@@ -23,6 +35,74 @@ def _agent() -> MemoryQAAgent:
         chat_client=MockChatClient(),
         config=RetrievalConfig(max_chars=60, overlap_chars=10, top_k=3),
     )
+
+
+@pytest.mark.parametrize("chat_client", [MockChatClient(), object()])
+def test_formal_agent_rejects_mock_or_arbitrary_injected_client(chat_client):
+    enc = FakeEncoder(dim=128)
+    store = PersistentKnowledgeMemory(key_dim=enc.dim, db_path=":memory:")
+    with pytest.raises(RuntimeError, match="requires a validated formal QwenChatClient"):
+        MemoryQAAgent(
+            encoder=enc,
+            store=store,
+            chat_client=chat_client,
+            config=RetrievalConfig(competition_mode=True),
+        )
+
+
+def test_formal_agent_requires_exact_configured_budget(tmp_path):
+    ledger_path = str(tmp_path / "usage.json")
+    enc = FakeEncoder(dim=128)
+    store = PersistentKnowledgeMemory(key_dim=enc.dim, db_path=":memory:")
+    client = QwenChatClient(
+        api_key="test-key",
+        competition_mode=True,
+        usage_ledger=UsageLedger(max_tokens=5_000_000, path=ledger_path),
+        formal_run_id=f"test-run-{tmp_path.name}",
+        formal_ledger_path=ledger_path,
+    )
+    with pytest.raises(ValueError, match="token_budget=5000000"):
+        MemoryQAAgent(
+            encoder=enc,
+            store=store,
+            chat_client=client,
+            config=RetrievalConfig(
+                competition_mode=True,
+                token_budget=4_999_999,
+                formal_run_id=f"test-run-{tmp_path.name}",
+                formal_ledger_path=ledger_path,
+            ),
+        )
+
+
+def test_formal_agent_accepts_only_validated_formal_qwen_client(tmp_path):
+    ledger_path = str(tmp_path / "usage.json")
+    client = QwenChatClient(
+        api_key="test-key",
+        competition_mode=True,
+        usage_ledger=UsageLedger(max_tokens=5_000_000, path=ledger_path),
+        formal_run_id=f"test-run-{tmp_path.name}",
+        formal_ledger_path=ledger_path,
+    )
+    agent = MemoryQAAgent(
+        chat_client=client,
+        config=RetrievalConfig(
+            competition_mode=True,
+            retrieval_backend="lexical",
+            formal_run_id=f"test-run-{tmp_path.name}",
+            formal_ledger_path=ledger_path,
+        ),
+    )
+    assert agent.chat_client is client
+
+
+def test_formal_agent_rejects_nonformal_qwen_client():
+    client = QwenChatClient(api_key="test-key")
+    with pytest.raises(ValueError, match="formal mode requires competition_mode=True"):
+        MemoryQAAgent(
+            chat_client=client,
+            config=RetrievalConfig(competition_mode=True, retrieval_backend="lexical"),
+        )
 
 
 def test_ingest_returns_chunk_count():
@@ -54,6 +134,29 @@ def test_doc_id_filter_ranks_within_allowed_set():
     assert any("124.5" in h for h in hits)
 
 
+def test_empty_doc_id_filter_does_not_fall_back_to_all_documents():
+    agent = _agent()
+    agent.ingest_document("annual-2023", REPORT)
+    assert agent.retrieve("营业收入是多少", doc_ids=[]) == []
+
+
+def test_split_a_requires_doc_ids_and_split_b_resolves_candidates():
+    agent = MemoryQAAgent(
+        chat_client=MockChatClient(),
+        config=RetrievalConfig(retrieval_backend="lexical"),
+    )
+    agent.ingest_document("annual", "2025 年营业收入为 200 亿元。")
+    agent.ingest_document("noise", "本段只讨论天气和旅行。")
+
+    with pytest.raises(ValueError, match="split A requires"):
+        agent.retrieve("营业收入是多少", split="A")
+    with pytest.raises(ValueError, match="split B must not"):
+        agent.retrieve("营业收入是多少", doc_ids=["annual"], split="B")
+
+    hits = agent.retrieve("营业收入是多少", split="B")
+    assert hits and any("200 亿元" in hit for hit in hits)
+
+
 def test_answer_question_shape_and_usage():
     agent = _agent()
     agent.ingest_document("annual-2023", REPORT)
@@ -80,3 +183,80 @@ def test_answer_without_ingest_still_returns_valid_row():
     # No context retrieved, but the pipeline must still produce a valid answer.
     assert res.answer in {"A", "B"}
     assert res.usage.total_tokens > 0
+
+
+def test_structured_judgement_parses_option_states_and_falls_back():
+    assert _parse_structured_answer(
+        "A=REFUTED\nB=SUPPORTED\nC=INSUFFICIENT\nANSWER:B",
+        "multi",
+        3,
+    ) == "B"
+    assert _parse_structured_answer(
+        "A: left=12%; relation=<; right=50%; state=SUPPORTED\nANSWER:A",
+        "mcq",
+        2,
+    ) == "A"
+    assert _parse_structured_answer("the answer is C", "mcq", 4) == "C"
+
+
+def test_structured_prompt_uses_relation_check_only_when_needed():
+    relation = MemoryQAAgent._build_structured_prompt(
+        "哪一项增速高于另一项？", ["12%", "8%"], "mcq", "context"
+    )
+    ordinary = MemoryQAAgent._build_structured_prompt(
+        "关于保单贷款，哪些说法正确？", ["允许", "不允许"], "multi", "context"
+    )
+    assert "matching units and periods" in relation
+    assert "matching units and periods" not in ordinary
+
+
+class _RecordingStructuredClient:
+    def __init__(self):
+        self.prompts = []
+
+    def chat(self, messages, temperature, max_tokens):
+        self.prompts.append(messages[-1]["content"])
+        return ChatResult(
+            "A=SUPPORTED\nB=REFUTED\nANSWER:A",
+            TokenUsage(prompt_tokens=2, completion_tokens=1, total_tokens=3),
+        )
+
+
+def test_calculation_judgement_is_targeted_and_usage_is_counted():
+    client = _RecordingStructuredClient()
+    agent = MemoryQAAgent(
+        encoder=FakeEncoder(dim=128),
+        store=PersistentKnowledgeMemory(key_dim=128, db_path=":memory:"),
+        chat_client=client,
+        config=RetrievalConfig(max_chars=60, overlap_chars=10, top_k=3),
+    )
+    agent.ingest_document("annual", "现金价值为 12 万元，手续费比例为 0%。")
+    calculated = agent.answer_question(
+        qid="calc", question="退保所得金额是多少？", options=["12万元", "10万元"],
+        qtype="mcq", doc_ids=["annual"],
+    )
+    factual = agent.answer_question(
+        qid="fact", question="产品名称是什么？", options=["甲", "乙"],
+        qtype="mcq", doc_ids=["annual"],
+    )
+    assert len(client.prompts) == 3
+    assert calculated.usage.total_tokens == 6
+    assert factual.usage.total_tokens == 3
+
+
+def test_b_answer_uses_same_answer_path_without_doc_ids():
+    client = _RecordingStructuredClient()
+    agent = MemoryQAAgent(
+        chat_client=client,
+        config=RetrievalConfig(retrieval_backend="lexical"),
+    )
+    agent.ingest_document("candidate", "2025 年营业收入为 200 亿元。")
+    result = agent.answer_question(
+        qid="b1",
+        question="营业收入是多少？",
+        options=["200 亿元", "100 亿元"],
+        qtype="mcq",
+        split="B",
+    )
+    assert result.answer == "A"
+    assert len(client.prompts) == 1

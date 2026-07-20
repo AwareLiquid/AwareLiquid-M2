@@ -1,0 +1,62 @@
+{
+  "fixture_metadata": {
+    "synthetic": true,
+    "real_dataset": false,
+    "purpose": "Local offline AFAC contract and component verification only",
+    "prohibited_claims": [
+      "real leaderboard accuracy",
+      "official score",
+      "submission readiness",
+      "real token usage"
+    ]
+  },
+  "questions": [
+    {
+      "qid": "synthetic_fin_a_001",
+      "domain": "financial_reports",
+      "split": "A",
+      "question": "Synthetic revenue comparison question?",
+      "options": {
+        "A": "Synthetic option A",
+        "B": "Synthetic option B",
+        "C": "Synthetic option C",
+        "D": "Synthetic option D"
+      },
+      "answer_format": "mcq",
+      "type": "comparison",
+      "doc_ids": [
+        "synthetic_report_01",
+        "synthetic_report_02"
+      ]
+    },
+    {
+      "qid": "synthetic_reg_b_001",
+      "domain": "regulatory",
+      "split": "B",
+      "question": "Synthetic true-or-false clause question?",
+      "options": {
+        "A": "Synthetic option A",
+        "B": "Synthetic option B",
+        "C": "Synthetic option C",
+        "D": "Synthetic option D"
+      },
+      "answer_format": "tf",
+      "type": "clause",
+      "doc_ids": null
+    },
+    {
+      "qid": "synthetic_ins_b_002",
+      "domain": "insurance",
+      "split": "B",
+      "question": "Synthetic multiple-choice formula question?",
+      "options": {
+        "A": "Synthetic option A",
+        "B": "Synthetic option B",
+        "C": "Synthetic option C",
+        "D": "Synthetic option D"
+      },
+      "answer_format": "multi",
+      "type": "formula"
+    }
+  ]
+}

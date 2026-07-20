@@ -1,0 +1,37 @@
+{
+  "fixture_kind": "synthetic",
+  "real_dataset": false,
+  "contract_version": "afac-m0-v1",
+  "questions": [
+    {
+      "qid": "synthetic_fin_a_001",
+      "domain": "financial_reports",
+      "split": "A",
+      "question": "合成示例中，2025 年收入是多少？",
+      "options": {
+        "A": "100 元",
+        "B": "200 元",
+        "C": "300 元",
+        "D": "400 元"
+      },
+      "answer_format": "mcq",
+      "type": "事实查找",
+      "doc_ids": ["synthetic-doc-1"]
+    },
+    {
+      "qid": "synthetic_reg_b_001",
+      "domain": "regulatory",
+      "split": "B",
+      "question": "合成条款明确允许该行为。",
+      "options": {
+        "A": "占位选项 A",
+        "B": "占位选项 B",
+        "C": "占位选项 C",
+        "D": "占位选项 D"
+      },
+      "answer_format": "tf",
+      "type": "判断",
+      "doc_ids": null
+    }
+  ]
+}

@@ -37,3 +37,43 @@ def test_relevance_ordering_preserves_document_order():
     pos_rev = out.text.find("124.5")
     assert pos_profit != -1 and pos_rev != -1
     assert pos_profit < pos_rev
+
+
+def test_coverage_keeps_one_relevant_sentence_from_each_passage():
+    comp = ExtractiveCompressor(budget_chars=200, ensure_passage_coverage=True)
+    passages = [
+        "甲公司营业收入为 100 亿元。甲公司的其他说明。",
+        "乙公司营业收入为 200 亿元。乙公司的其他说明。",
+    ]
+
+    out = comp.compress("比较两家公司营业收入", passages)
+
+    assert "100 亿元" in out.text
+    assert "200 亿元" in out.text
+
+
+def test_coverage_can_be_disabled_for_legacy_global_ranking():
+    comp = ExtractiveCompressor(budget_chars=100, ensure_passage_coverage=False)
+    out = comp.compress(
+        "营业收入",
+        ["甲公司营业收入为 100 亿元。", "乙公司营业收入为 200 亿元。"],
+    )
+
+    assert out.kept_sentences >= 1
+
+
+def test_coverage_queries_preserve_independent_option_evidence():
+    comp = ExtractiveCompressor(budget_chars=220)
+    passages = [
+        "收入同比增长 10%。研发费用占收入 5%。现金流同比下降。",
+    ]
+
+    out = comp.compress(
+        "哪些说法正确",
+        passages,
+        coverage_queries=["收入增长", "研发费用占收入", "现金流下降"],
+    )
+
+    assert "增长 10%" in out.text
+    assert "研发费用" in out.text
+    assert "现金流" in out.text

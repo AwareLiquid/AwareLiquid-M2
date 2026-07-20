@@ -1,0 +1,43 @@
+{
+  "parser_version": "fixture-parser-v1",
+  "records": [
+    {
+      "domain": "synthetic-finance",
+      "doc_id": "fixture-report",
+      "page": 2,
+      "source_path": "synthetic/fixture-report.txt",
+      "char_start": 41,
+      "char_end": 66,
+      "content": "Revenue | 124.5 | CNY million",
+      "section": "Results",
+      "title": "Synthetic report",
+      "table_id": "table-2",
+      "row_id": "row-revenue",
+      "column_ids": ["metric", "amount", "unit"],
+      "unit": "CNY million",
+      "footnote": "Amounts exclude tax.",
+      "parent_evidence_id": "evidence-parent-fixture",
+      "neighbor_evidence_ids": ["evidence-before-fixture", "evidence-after-fixture"],
+      "parse_warning": ["table-grid-reconstructed"]
+    },
+    {
+      "domain": "synthetic-finance",
+      "doc_id": "fixture-report",
+      "page": 3,
+      "source_path": "synthetic/fixture-report.txt",
+      "char_start": 67,
+      "char_end": 67,
+      "content": "",
+      "section": null,
+      "title": null,
+      "table_id": null,
+      "row_id": null,
+      "column_ids": [],
+      "unit": null,
+      "footnote": null,
+      "parent_evidence_id": null,
+      "neighbor_evidence_ids": [],
+      "parse_warning": ["empty-page", "ocr-unavailable"]
+    }
+  ]
+}

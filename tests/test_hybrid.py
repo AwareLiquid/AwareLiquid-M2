@@ -42,6 +42,13 @@ def test_bm25_respects_doc_id_filter():
     assert s.search_bm25("信用评级", doc_ids=["ann"]) == []
 
 
+def test_vector_store_empty_doc_filter_is_not_global():
+    enc, s = _store()
+    s.write(enc.encode("信用评级为 AAA"), "信用评级为 AAA", meta={"doc_id": "bond"})
+    assert s.query(enc.encode("信用评级"), doc_ids=[]) == []
+    assert s.search_bm25("信用评级", doc_ids=[]) == []
+
+
 # ---- RRF fusion ---------------------------------------------------------
 
 def test_rrf_fuse_combines_and_dedupes():
