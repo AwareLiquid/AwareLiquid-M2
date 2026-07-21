@@ -71,9 +71,30 @@ This matters more than a feature list:
   and to honour document filtering.
 - Ledger verified crash-safe and cross-process locked.
 
+**Measurable in one command**
+- A labelled evaluation set ships in [`evals/`](evals/): 5 documents and 22
+  questions spanning fact lookup, clause location, cross-document comparison,
+  formula calculation and multi-document reasoning, across all three answer
+  formats. It deliberately includes the traps that break naive pipelines —
+  exception clauses that flip the answer, the same metric across two years, and
+  near-identical figures.
+
+  ```bash
+  AWARELIQUID_LLM_API_KEY=sk-...  python evals/run_eval.py
+  ```
+
+  It reports accuracy overall, by question type and by answer format, plus token
+  cost and the resulting score.
+
 **NOT validated**
-- **No real-world accuracy number exists.** The pipeline has never been scored
-  against a labelled dataset. Any accuracy claim would be fabrication.
+- **No accuracy number has been recorded yet.** The harness is built and proven,
+  but a real model run has not been performed here, so this README states no
+  accuracy figure. Any such claim would be fabrication until `run_eval.py` is run
+  against a real model.
+- The eval set was authored alongside the system, so it measures the *pipeline*
+  (does retrieval find the passage, does compression keep the answer sentence,
+  does parsing return the right letter) — **not** real-world difficulty. It is a
+  regression baseline, not a leaderboard.
 - The retrieval-vs-truncation trade-off is **unmeasured**. Published results on
   similar tasks report naive truncation *beating* chunk retrieval; this adapter
   bets the other way and that bet is untested here.
