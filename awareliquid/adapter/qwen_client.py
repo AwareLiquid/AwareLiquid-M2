@@ -26,6 +26,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
@@ -34,7 +35,74 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
-import fcntl
+# Advisory cross-process file locking. `fcntl` is POSIX-only and `msvcrt` is
+# Windows-only, so import whichever exists rather than hard-failing at import
+# time -- a top-level `import fcntl` makes this whole package unimportable on
+# Windows, including for offline/mock use.
+try:  # POSIX
+    import fcntl
+except ImportError:  # pragma: no cover - platform dependent
+    fcntl = None  # type: ignore[assignment]
+try:  # Windows
+    import msvcrt
+except ImportError:  # pragma: no cover - platform dependent
+    msvcrt = None  # type: ignore[assignment]
+
+# Upper bound on how long we wait for a peer to release the ledger lock.
+_LOCK_TIMEOUT_SECONDS = 60.0
+
+
+def _acquire_file_lock(lock_file) -> None:
+    """Take an exclusive advisory lock on *lock_file*, blocking until granted."""
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        return
+    if msvcrt is not None:
+        # msvcrt locks a byte range starting at the current position. LK_LOCK
+        # blocks but gives up after ~10s, so retry until our own deadline.
+        lock_file.seek(0)
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+    # No advisory locking on this platform: the in-process RLock still applies,
+    # but concurrent processes are not serialised.
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Flush a directory entry so a completed rename survives a crash.
+
+    POSIX-only: Windows has no directory handle to sync (opening one raises),
+    and NTFS journals the rename itself, so this is a no-op there.
+    """
+    if os.name == "nt":
+        return
+    try:
+        directory_fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:  # pragma: no cover - platform dependent
+        return
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _release_file_lock(lock_file) -> None:
+    """Release the lock taken by :func:`_acquire_file_lock`."""
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        return
+    if msvcrt is not None:
+        lock_file.seek(0)
+        try:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            # Already released (or never held) -- nothing to undo.
+            pass
 
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_MODEL = "qwen-plus"
@@ -232,11 +300,11 @@ class UsageLedger:
         lock_path = self.path.with_name(f"{self.path.name}.lock")
         try:
             with lock_path.open("a+b") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                _acquire_file_lock(lock_file)
                 try:
                     yield
                 finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    _release_file_lock(lock_file)
         except OSError as exc:
             raise RuntimeError(f"unable to lock usage ledger: {self.path}") from exc
 
@@ -255,11 +323,7 @@ class UsageLedger:
                 temporary_file.flush()
                 os.fsync(temporary_file.fileno())
             os.replace(temporary_path, self.path)
-            directory_fd = os.open(self.path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            _fsync_directory(self.path.parent)
         except OSError:
             try:
                 os.unlink(temporary_path)
