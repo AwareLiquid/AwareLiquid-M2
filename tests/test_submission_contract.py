@@ -3,7 +3,7 @@ import io
 
 import pytest
 
-from awareliquid.adapter.afac_contract import (
+from awareliquid.adapter.submission_contract import (
     CSV_HEADER,
     TOKEN_BUDGET,
     ContractError,

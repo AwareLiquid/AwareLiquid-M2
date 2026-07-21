@@ -38,3 +38,10 @@ data/
 
 # Local-only strategy notes (not published)
 docs/analysis/
+
+# Third-party source material and derived artefacts (never redistribute)
+downloads/
+reference/
+output/
+data/
+docs/runs/

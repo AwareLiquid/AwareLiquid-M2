@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Dict, List, Sequence
 
 from awareliquid import MemoryQAAgent, RetrievalConfig
-from awareliquid.adapter.afac_contract import (
+from awareliquid.adapter.submission_contract import (
     SubmissionAnswer,
     ParsedQuestion,
     parse_questions,
@@ -215,7 +215,7 @@ def main() -> int:
         checkpoint_path = Path(args.checkpoint or f"{args.out}.checkpoint.json")
 
     formal_run_id = os.environ.get("AWARELIQUID_FORMAL_RUN_ID") or (
-        f"afac-submit-{_sha256_json(question_payloads)[:16]}"
+        f"submission-{_sha256_json(question_payloads)[:16]}"
     )
     formal_ledger_path = os.environ.get("AWARELIQUID_FORMAL_LEDGER_PATH") or (
         f"{args.out}.usage.json"

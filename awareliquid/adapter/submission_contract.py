@@ -1,4 +1,4 @@
-"""Fail-closed AFAC question and submission CSV contract.
+"""Fail-closed question and submission CSV contract.
 
 This module is deliberately pure: it performs no model invocation, network access,
 or file I/O.  The official CSV is defined here rather than inferred from legacy

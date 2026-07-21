@@ -2,7 +2,7 @@
   "fixture_metadata": {
     "synthetic": true,
     "real_dataset": false,
-    "purpose": "Local offline AFAC contract and component verification only",
+    "purpose": "Local offline contract and component verification only",
     "prohibited_claims": [
       "real leaderboard accuracy",
       "official score",

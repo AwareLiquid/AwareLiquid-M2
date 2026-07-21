@@ -1,7 +1,7 @@
 {
   "fixture_kind": "synthetic",
   "real_dataset": false,
-  "contract_version": "afac-m0-v1",
+  "contract_version": "submission-contract-v1",
   "questions": [
     {
       "qid": "synthetic_fin_a_001",

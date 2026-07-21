@@ -1,4 +1,4 @@
-"""Frozen AFAC input, internal, and formal-output contracts."""
+"""Frozen input, internal, and formal-output submission contracts."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Tuple
 
 
-AFAC_TOKEN_BUDGET = 5_000_000
+SUBMISSION_TOKEN_BUDGET = 5_000_000
 ANSWER_FORMATS = ("mcq", "multi", "tf")
 OPTION_KEYS = ("A", "B", "C", "D")
 TF_OUTPUTS = ("T", "F")

@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import submit  # noqa: E402
-from awareliquid.adapter.afac_contract import ContractError, SubmissionAnswer, parse_questions
+from awareliquid.adapter.submission_contract import ContractError, SubmissionAnswer, parse_questions
 
 
 def test_render_csv_delegates_to_the_official_five_column_contract():

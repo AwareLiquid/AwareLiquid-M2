@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from awareliquid.adapter.contracts import (
-    AFAC_TOKEN_BUDGET,
+    SUBMISSION_TOKEN_BUDGET,
     ContractError,
     SubmissionTokenUsage,
     build_question_row,
@@ -13,11 +13,11 @@ from awareliquid.adapter.contracts import (
     validate_formal_answer,
     validate_question,
 )
-from awareliquid.adapter.afac_contract import parse_question
+from awareliquid.adapter.submission_contract import parse_question
 
 
 FIXTURE_PATH = (
-    Path(__file__).parent / "fixtures" / "afac_synthetic_golden" / "questions.json"
+    Path(__file__).parent / "fixtures" / "synthetic_golden_set" / "questions.json"
 )
 
 
@@ -113,19 +113,28 @@ def test_options_are_exactly_the_four_official_keys():
     assert exc_info.value.as_dict()["code"] == "INVALID_OPTIONS"
 
 
-def test_real_group_a_questions_pass_both_contract_entrypoints():
-    """The internal and canonical validators must agree on audited A data."""
+@pytest.mark.parametrize(
+    ("answer_format", "options"),
+    [
+        ("mcq", {"A": "1", "B": "2", "C": "3", "D": "4"}),
+        ("multi", {"A": "1", "B": "2", "C": "3", "D": "4"}),
+        ("tf", {"A": "正确", "B": "错误"}),  # judgment questions carry only A/B
+    ],
+)
+def test_both_contract_entrypoints_agree_on_every_answer_format(answer_format, options):
+    """The internal and canonical validators must agree, for every question shape.
 
-    paths = sorted(glob.glob("data/questions/group_a/*.json"))
-    questions = [item for path in paths for item in json.loads(Path(path).read_text(encoding="utf-8"))]
+    Built from synthetic payloads rather than any third-party dataset, so the
+    invariant holds without redistributing someone else's data.
+    """
 
-    assert len(paths) == 5
-    assert len(questions) == 100
-    for payload in questions:
-        canonical = parse_question(payload)
-        internal = validate_question(payload)
-        assert internal.answer_format == canonical.answer_format
-        assert tuple(internal.options) == tuple(canonical.options)
+    payload = _question(answer_format=answer_format, options=options)
+
+    canonical = parse_question(payload)
+    internal = validate_question(payload)
+
+    assert internal.answer_format == canonical.answer_format
+    assert tuple(internal.options) == tuple(canonical.options)
 
 
 @pytest.mark.parametrize(
@@ -152,14 +161,14 @@ def test_csv_contract_has_no_header_and_summary_is_first_row():
 
     rows = [
         build_summary_row(
-            budget_tokens=AFAC_TOKEN_BUDGET,
+            budget_tokens=SUBMISSION_TOKEN_BUDGET,
             used_tokens=902,
             unused_tokens=0,
         ),
         build_question_row("synthetic_fin_a_001", "A", usage),
     ]
 
-    assert AFAC_TOKEN_BUDGET == 5_000_000
+    assert SUBMISSION_TOKEN_BUDGET == 5_000_000
     assert rows[0] == ["summary", 5_000_000, 902, 0]
     assert rows[1] == ["synthetic_fin_a_001", "A", 900, 2, 902]
     assert rows[0][0] != "qid"
@@ -167,7 +176,7 @@ def test_csv_contract_has_no_header_and_summary_is_first_row():
 
 def test_summary_row_rejects_missing_unused_tokens():
     with pytest.raises(ContractError) as exc_info:
-        build_summary_row(budget_tokens=AFAC_TOKEN_BUDGET, used_tokens=902)
+        build_summary_row(budget_tokens=SUBMISSION_TOKEN_BUDGET, used_tokens=902)
 
     assert exc_info.value.as_dict()["code"] == "MISSING_UNUSED_TOKENS"
 
