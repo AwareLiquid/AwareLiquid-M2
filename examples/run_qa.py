@@ -1,11 +1,13 @@
 """Minimal end-to-end demo of the AwareLiquid Qwen adapter.
 
-Runs offline out of the box: with no API key configured the chat client falls
-back to a deterministic mock, so this script exercises the full
-ingest -> retrieve -> compress -> answer loop without network access.
+Exercises the full ingest -> retrieve -> compress -> answer loop.
 
-Set AWARELIQUID_LLM_API_KEY (or DASHSCOPE_API_KEY) to answer with a real Qwen
-model instead.
+The chat client fails closed, so pick one of:
+
+* offline mock  — ``AWARELIQUID_LLM_BACKEND=mock`` **and** ``AWARELIQUID_TEST_MODE=1``
+* real model    — ``AWARELIQUID_LLM_API_KEY`` (or ``DASHSCOPE_API_KEY``)
+
+With neither set this script raises rather than silently faking answers.
 """
 
 from awareliquid import MemoryQAAgent, RetrievalConfig, summarize_usage

@@ -80,15 +80,20 @@ python examples/run_qa.py
 ## Configuration
 
 Generation is configured entirely through environment variables — nothing is
-hard-coded, and the client falls back to a deterministic offline mock when no key
-is present:
+hard-coded. The client **fails closed**: a missing key raises rather than quietly
+falling back to a mock, so a misconfigured run can never masquerade as a real one.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `AWARELIQUID_LLM_BACKEND` | `qwen` | `qwen` or `mock` (offline). |
-| `AWARELIQUID_LLM_API_KEY` | — | API key (falls back to `DASHSCOPE_API_KEY`). |
+| `AWARELIQUID_LLM_BACKEND` | `qwen` | `qwen` or `mock`. |
+| `AWARELIQUID_LLM_API_KEY` | — | API key (falls back to `DASHSCOPE_API_KEY`). Required; no key → error. |
 | `AWARELIQUID_LLM_BASE_URL` | DashScope compatible-mode | OpenAI-compatible base URL. |
 | `AWARELIQUID_LLM_MODEL` | `qwen-plus` | Model id. |
+| `AWARELIQUID_TEST_MODE` | — | Set to `1` (with backend `mock`) to allow the offline mock. |
+| `AWARELIQUID_ALLOW_FORMAL_NETWORK` | `0` | Formal runs deny network egress unless this is exactly `1`. |
+
+See [`.env.example`](.env.example) for the full set, including the formal-run
+ledger variables. Nothing is auto-loaded — export them yourself.
 
 ```bash
 export AWARELIQUID_LLM_API_KEY="sk-..."

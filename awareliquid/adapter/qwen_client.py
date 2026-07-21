@@ -461,16 +461,25 @@ class QwenChatClient:
         }
 
         last_err: Optional[Exception] = None
+        # True once `reserved_tokens` has been settled by a successful
+        # reconcile, so the error paths below know not to release it twice.
+        settled = False
         for attempt in range(self.max_retries + 1):
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     body = json.loads(resp.read().decode("utf-8"))
                 result = self._parse(body, require_usage=True)
-                if self.competition_mode:
-                    if result.model != self.model:
-                        raise RuntimeError("Qwen API returned a wrong or missing model")
+                if self.competition_mode and result.model != self.model:
+                    # The API already served and BILLED this call, so its tokens
+                    # must be counted even though we reject the response. Simply
+                    # releasing the reservation here would silently under-report
+                    # real spend against the budget.
+                    self.usage_ledger.reconcile(reserved_tokens, result.usage)
+                    settled = True
+                    raise RuntimeError("Qwen API returned a wrong or missing model")
                 self.usage_ledger.reconcile(reserved_tokens, result.usage)
+                settled = True
                 return result
             except urllib.error.HTTPError as exc:  # 4xx/5xx
                 detail = exc.read().decode("utf-8", "ignore")
@@ -483,8 +492,10 @@ class QwenChatClient:
             except Exception:
                 # Response validation errors must not strand a reservation.
                 # They are not transport failures and should not be retried
-                # blindly.
-                self.usage_ledger.release(reserved_tokens)
+                # blindly. A reservation already settled by reconcile (billed
+                # usage recorded) must NOT be released again.
+                if not settled:
+                    self.usage_ledger.release(reserved_tokens)
                 raise
         self.usage_ledger.release(reserved_tokens)
         raise RuntimeError(f"Qwen chat failed after {self.max_retries + 1} attempts: {last_err}")
@@ -582,9 +593,22 @@ def _bind_formal_ledger_path(run_id: str, ledger_path: str) -> None:
             )
 
 
+def formal_network_enabled() -> bool:
+    """Whether formal (competition-mode) network egress is currently permitted.
+
+    Formal runs deny egress by default; the operator must arm it deliberately.
+    Callers use this to fail fast at start-up instead of dying on the first
+    question, after documents have already been ingested.
+    """
+    return os.environ.get(_FORMAL_NETWORK_ENV, "0") == "1"
+
+
+FORMAL_NETWORK_ENV = _FORMAL_NETWORK_ENV  # public alias for operators/tooling
+
+
 def _deny_formal_network_transport() -> None:
     """Fail before payload, authorization header, or urllib transport exists."""
-    if os.environ.get(_FORMAL_NETWORK_ENV, "0") != "1":
+    if not formal_network_enabled():
         raise RuntimeError("formal Qwen network transport is denied in this offline phase")
 
 

@@ -40,6 +40,10 @@ from awareliquid.adapter.afac_contract import (
     parse_questions,
     render_submission_csv,
 )
+from awareliquid.adapter.qwen_client import (
+    FORMAL_NETWORK_ENV,
+    formal_network_enabled,
+)
 
 # Map the input's answer_format values to the internal question type.
 _QTYPE = {
@@ -181,7 +185,24 @@ def main() -> int:
         default="lexical",
         help="formal submission retrieval backend (lexical/BM25 only)",
     )
+    ap.add_argument(
+        "--reset-ledger",
+        action="store_true",
+        help="zero the token ledger before starting (DISCARDS recorded spend)",
+    )
     args = ap.parse_args()
+
+    # Preflight: a formal run denies network egress unless deliberately armed.
+    # Check it BEFORE loading/ingesting documents so an unarmed run fails in a
+    # second instead of after minutes of indexing, on question 1.
+    if not formal_network_enabled():
+        raise SystemExit(
+            f"{FORMAL_NETWORK_ENV} is not set to '1', so this formal run cannot "
+            "call the Qwen API and would fail on the first question.\n"
+            f"  Arm it deliberately:  export {FORMAL_NETWORK_ENV}=1   "
+            f"(PowerShell: $env:{FORMAL_NETWORK_ENV}=\"1\")"
+        )
+
     docs = load_docs(args.docs)
     question_payloads = load_questions(args.questions)
     if args.limit:
@@ -199,6 +220,32 @@ def main() -> int:
     formal_ledger_path = os.environ.get("AWARELIQUID_FORMAL_LEDGER_PATH") or (
         f"{args.out}.usage.json"
     )
+
+    # The token ledger records REAL spend and deliberately outlives --fresh:
+    # restarting the answering loop does not un-bill tokens already consumed.
+    # Discarding it must therefore be an explicit choice, and carrying it over
+    # must be visible (otherwise a later run dies mid-way on "budget exhausted").
+    ledger_file = Path(formal_ledger_path)
+    if args.reset_ledger:
+        for stale in (ledger_file, ledger_file.with_name(f"{ledger_file.name}.lock")):
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
+        print(f"reset token ledger: {ledger_file}", file=sys.stderr)
+    elif ledger_file.exists():
+        try:
+            recorded = int(json.loads(ledger_file.read_text(encoding="utf-8")).get("used_tokens", 0))
+        except (OSError, ValueError, TypeError):
+            recorded = 0
+        if recorded:
+            carried = "CARRIED OVER into this --fresh run" if args.fresh else "in effect"
+            print(
+                f"NOTE: token ledger {ledger_file} already records {recorded:,} used tokens "
+                f"({carried}). Pass --reset-ledger to zero it.",
+                file=sys.stderr,
+            )
+
     agent = MemoryQAAgent(
         config=RetrievalConfig(
             retrieval_backend=args.retrieval_backend,

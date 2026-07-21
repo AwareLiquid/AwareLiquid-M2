@@ -319,3 +319,27 @@ def test_qwen_budget_denies_before_transport(tmp_path, monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", lambda *unused: pytest.fail("transport called"))
     with pytest.raises(RuntimeError, match="budget exhausted"):
         spent.chat([{"role": "user", "content": "offline only"}], max_tokens=1)
+
+
+def test_billed_usage_is_recorded_even_when_the_response_is_rejected(tmp_path, monkeypatch):
+    """A served-but-rejected response was still billed, so it must be counted.
+
+    Releasing the reservation instead would silently under-report real spend
+    against the 5M budget — the ledger would show room that no longer exists.
+    """
+    monkeypatch.setenv("AWARELIQUID_ALLOW_FORMAL_NETWORK", "1")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: _Response(_response(model="qwen-turbo")),
+    )
+    client = _formal_client(tmp_path)  # requests qwen-plus, API answers qwen-turbo
+
+    with pytest.raises(RuntimeError, match="wrong or missing model"):
+        client.chat([{"role": "user", "content": "Answer A"}], max_tokens=8)
+
+    # The 5 tokens the API billed are committed, not discarded.
+    assert client.usage_ledger.snapshot()["used_tokens"] == 5
+    assert json.loads(Path(client.usage_ledger.path).read_text(encoding="utf-8")) == {
+        "max_tokens": 5_000_000,
+        "used_tokens": 5,
+    }

@@ -1,4 +1,4 @@
-{"qid": "q1", "domain": "annual_report", "split": "A", "answer_format": "mcq", "doc_ids": ["annual-2023"], "question": "公司 2023 年营业收入是多少？", "options": {"A": "114.9 亿元", "B": "124.5 亿元", "C": "18.2 亿元", "D": "9.7 亿元"}}
-{"qid": "q2", "domain": "annual_report", "split": "A", "answer_format": "tf", "doc_ids": ["annual-2023"], "question": "2023 年归母净利润同比实现增长，判断该说法是否正确。", "options": {"A": "正确", "B": "错误"}}
-{"qid": "q3", "domain": "bond", "split": "A", "answer_format": "mcq", "doc_ids": ["bond-prospectus"], "question": "本期债券的信用评级是什么？", "options": {"A": "AA", "B": "AAA", "C": "A", "D": "BBB"}}
-{"qid": "q4", "domain": "bond", "split": "A", "answer_format": "multi", "doc_ids": ["bond-prospectus"], "question": "以下关于本期债券的描述，哪些是正确的？", "options": {"A": "发行规模 20 亿元", "B": "票面利率 3.45%", "C": "期限 10 年", "D": "无信用评级"}}
+{"qid": "q1", "domain": "financial_reports", "split": "A", "type": "财务指标查询", "answer_format": "mcq", "doc_ids": ["annual-2023"], "question": "公司 2023 年营业收入是多少？", "options": {"A": "114.9 亿元", "B": "124.5 亿元", "C": "18.2 亿元", "D": "9.7 亿元"}}
+{"qid": "q2", "domain": "financial_reports", "split": "A", "type": "事实判断", "answer_format": "tf", "doc_ids": ["annual-2023"], "question": "2023 年归母净利润同比实现增长，判断该说法是否正确。", "options": {"A": "正确", "B": "错误"}}
+{"qid": "q3", "domain": "financial_contracts", "split": "A", "type": "条款要素查询", "answer_format": "mcq", "doc_ids": ["bond-prospectus"], "question": "本期债券的信用评级是什么？", "options": {"A": "AA", "B": "AAA", "C": "A", "D": "BBB"}}
+{"qid": "q4", "domain": "financial_contracts", "split": "A", "type": "条款多项核对", "answer_format": "multi", "doc_ids": ["bond-prospectus"], "question": "以下关于本期债券的描述，哪些是正确的？", "options": {"A": "发行规模 20 亿元", "B": "票面利率 3.45%", "C": "期限 10 年", "D": "无信用评级"}}
