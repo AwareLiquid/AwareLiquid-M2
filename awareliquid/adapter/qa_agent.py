@@ -566,6 +566,24 @@ class MemoryQAAgent:
             clause = meta.get("clause_id")
             if clause:
                 suffix += f" clause={clause}"
+            # Polarity is answer-bearing in clause text and easy to skim past:
+            # "X 属于责任免除" and "X 不属于责任免除" differ by one character.
+            # Restating the negated sentences after the passage makes the
+            # polarity explicit instead of leaving it buried mid-paragraph.
+            notes = []
+            negations = meta.get("negations") or []
+            if negations:
+                joined = " / ".join(str(item) for item in negations)
+                notes.append(f"[NEGATED — read literally, this DENIES the claim: {joined}]")
+            exceptions = meta.get("exceptions") or []
+            if exceptions:
+                joined = " / ".join(str(item) for item in exceptions)
+                notes.append(
+                    "[EXCEPTION — this carves a case OUT of the surrounding rule, so "
+                    f"the carved-out case is treated the OPPOSITE way: {joined}]"
+                )
+            if notes:
+                return f"[source doc_id={source}{suffix}]\n{content}\n" + "\n".join(notes)
         else:
             source = "unknown"
             suffix = ""

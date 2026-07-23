@@ -31,6 +31,57 @@ _HEADING = re.compile(
     r"^\s*(?:#{1,6}\s+|第[一二三四五六七八九十百\d]+[章节条款项]|"
     r"[一二三四五六七八九十百]+、|\d+(?:\.\d+){0,3}[、.])\s*.*$"
 )
+# Polarity markers. Clause documents turn on these: "酒后驾驶属于责任免除" and
+# "酒后驾驶不属于责任免除" differ by one character yet invert the answer. The
+# sentence survives retrieval and compression intact, but a reader matching on
+# the topic can skim straight past the negation -- so negated statements are
+# lifted out and surfaced separately instead of being left inline.
+_NEGATION = re.compile(
+    r"不属于|不承担|不负责|不负赔偿|不适用|不予|不得|不构成|不视为|不再|不受|"
+    r"无需|并非|免收|不收取|不计入|不包括|不包含|均不"
+)
+# "除外" / "但……除外" is an EXCEPTION to the surrounding rule, not a negation of
+# it: "感染艾滋病……但因输血导致的除外" means the transfusion case is carved OUT
+# of the exclusion, i.e. it IS covered. Labelling that as a negation tells the
+# reader the opposite of what the clause says, so exceptions are tracked and
+# announced separately from plain negations.
+_EXCEPTION = re.compile(r"除外|但书|另有约定|不在此限|但.{0,12}除外")
+# Latin sentence enders only split when followed by whitespace/end, so a decimal
+# such as "3.45" is never treated as a boundary.
+_SENTENCE = re.compile(r"(?<=[。！？；])\s*|(?<=[.!?;])(?=\s|$)")
+
+
+def _clip(sentence: str, max_chars: int) -> str:
+    return sentence if len(sentence) <= max_chars else sentence[:max_chars] + "…"
+
+
+def _polarity_statements(
+    text: str, limit: int = 3, max_chars: int = 120
+) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """Split *text* into (negated, excepted) sentences.
+
+    The two are kept apart on purpose. A negation reverses a claim ("酒后驾驶
+    不属于责任免除"); an exception carves a case OUT of the surrounding rule
+    ("……但因输血导致的除外"), which usually means the carved-out case is
+    treated the opposite way from the rule it sits in. Collapsing them into one
+    "negated" label misreports the second kind.
+    """
+    negated: List[str] = []
+    excepted: List[str] = []
+    for raw in _SENTENCE.split(text or ""):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        if _EXCEPTION.search(sentence) and len(excepted) < limit:
+            excepted.append(_clip(sentence, max_chars))
+        elif _NEGATION.search(sentence) and len(negated) < limit:
+            negated.append(_clip(sentence, max_chars))
+    return tuple(negated), tuple(excepted)
+
+
+def _negated_statements(text: str, limit: int = 3, max_chars: int = 120) -> Tuple[str, ...]:
+    """Sentences that explicitly negate something (exceptions excluded)."""
+    return _polarity_statements(text, limit, max_chars)[0]
 
 
 def _unique(values: List[str]) -> Tuple[str, ...]:
@@ -93,6 +144,12 @@ class EvidenceNode:
     neighbor_chunk_idxs: Tuple[int, ...]
     row_id: Optional[str] = None
     column_ids: Tuple[str, ...] = ()
+    # Sentences in this span that explicitly negate something. Polarity is a
+    # first-class structural field here for the same reason clause_id is: it is
+    # deterministic, extractable offline, and answer-bearing in clause text.
+    negations: Tuple[str, ...] = ()
+    # Sentences carving a case OUT of the surrounding rule ("……但……除外").
+    exceptions: Tuple[str, ...] = ()
 
     def as_meta(self) -> dict:
         return {
@@ -106,6 +163,8 @@ class EvidenceNode:
             "row_id": self.row_id,
             "column_ids": list(self.column_ids),
             "anchors": list(self.anchors),
+            "negations": list(self.negations),
+            "exceptions": list(self.exceptions),
             "neighbor_chunk_idxs": list(self.neighbor_chunk_idxs),
             "search_terms": " ".join(
                 value
@@ -149,6 +208,8 @@ def build_evidence_nodes(
                 row_id=row_id,
                 column_ids=column_ids,
                 anchors=anchors,
+                negations=_polarity_statements(content)[0],
+                exceptions=_polarity_statements(content)[1],
                 neighbor_chunk_idxs=neighbors,
             )
         )
