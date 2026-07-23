@@ -15,14 +15,26 @@ short answer.
 from __future__ import annotations
 
 import re
-from collections import Counter
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from .answer_parsing import (
+    _is_canonical_answer,
+    _majority_vote,
+    _parse_structured_answer,
+)
+from .calculation import (
+    _CALCULATION_MARKER,
+    _needs_calculation_judgement,
+    _verify_calculation_draft,
+)
 from .compressor import ExtractiveCompressor
+from .evidence_coverage import (
+    _merge_evidence_blocks,
+    _missing_evidence_anchors,
+    _missing_evidence_slots,
+)
 from .evidence_index import build_evidence_nodes
 from .hybrid import rrf_fuse
 from .qwen_client import (
@@ -42,176 +54,7 @@ _CLAIM_RELATION = re.compile(
     r"高于|低于|超过|不超过|少于|大于|小于|同比|增长|下降|增幅|复合增速|"
     r"占比|比例|每股|每10股|倍|差额|分别|排序|高到低|低到高|升序|降序"
 )
-_CALCULATION_MARKER = re.compile(
-    r"计算|排序|高到低|低到高|升序|降序|合计|总计|平均|金额|现金价值|退保所得|"
-    r"每股|每10股"
-)
-_OPTION_STATE = re.compile(
-    r"^\s*([A-Z])\s*=\s*(SUPPORTED|REFUTED|INSUFFICIENT)\b",
-    re.IGNORECASE,
-)
-_OPTION_RELATION_STATE = re.compile(
-    r"^\s*([A-Z])\s*:\s*.*?\bstate\s*=\s*"
-    r"(SUPPORTED|REFUTED|INSUFFICIENT)\b",
-    re.IGNORECASE,
-)
-_ANSWER_LINE = re.compile(r"(?:^|\n)\s*ANSWER\s*:\s*([A-Z]+)\b", re.IGNORECASE)
-_EVIDENCE_SLOT_GROUPS = (
-    ("营业收入", "营业总收入", "主营业务收入"),
-    ("归母净利润", "归属于上市公司股东的净利润"),
-    ("经营现金流", "经营活动产生的现金流量净额", "经营活动现金流量净额"),
-    ("研发投入", "研发费用", "研发投入占营业收入比例"),
-    ("现金分红", "每10股现金分红", "利润分配方案"),
-    ("一般医疗", "一般医疗保险金", "住院医疗费用"),
-    ("免赔额", "共享免赔额", "家庭共享免赔额"),
-    ("施救费用", "施救费", "必要合理施救费用"),
-    ("除外责任", "免责", "不承担责任"),
-)
-_EVIDENCE_ANCHOR = re.compile(
-    r"(?:19|20)\d{2}\s*年?"
-    r"|\d+(?:,\d{3})*(?:\.\d+)?\s*(?:个百分点|亿元|万元|美元|港元|bp|BP|%|％|亿|万|元)"
-    r"|第\s*[一二三四五六七八九十百\d]+\s*(?:条|章|节|款|项|个保单年度|保单年度)"
-    r"|AAA|AA\+?"
-    r"|除外|例外|但|不适用|特殊情形|免责|等待期"
-    ,
-)
-def _normalise_evidence_anchor(value: str) -> str:
-    return re.sub(r"\s+", "", str(value)).lower()
 
-
-def _missing_evidence_anchors(question: str, option: str, evidence: str) -> List[str]:
-    """Find exact, high-signal anchors from a claim missing in its evidence."""
-    anchors: List[str] = []
-    seen = set()
-    # Option anchors are the primary coverage contract.  Question anchors are
-    # added only when they are structural facts (dates, amounts, clauses, ...),
-    # not ordinary connective words such as ``但``.  This keeps a supplement
-    # query targeted instead of turning every multi-choice question into a
-    # broad second retrieval pass.
-    for match in _EVIDENCE_ANCHOR.finditer(f"{option} {question}"):
-        anchor = match.group(0).strip()
-        key = _normalise_evidence_anchor(anchor)
-        if key and key not in seen and len(key) > 1:
-            seen.add(key)
-            anchors.append(anchor)
-    evidence_text = _normalise_evidence_anchor(evidence)
-    return [anchor for anchor in anchors if _normalise_evidence_anchor(anchor) not in evidence_text]
-
-
-def _missing_evidence_slots(question: str, option: str, evidence: str) -> List[str]:
-    source = f"{question} {option}"
-    normalized = _normalise_evidence_anchor(evidence)
-    missing = []
-    for group in _EVIDENCE_SLOT_GROUPS:
-        if not any(term in source for term in group):
-            continue
-        if any(_normalise_evidence_anchor(term) in normalized for term in group):
-            continue
-        missing.append(" ".join(group))
-    return missing
-
-
-def _verify_calculation_draft(raw: str) -> str:
-    """Validate a Qwen calculation ledger with local Decimal arithmetic.
-
-    The model may extract facts and propose derived values, but it is not
-    trusted to perform the arithmetic.  Invalid or incomplete ledgers are
-    discarded instead of being repeated as authoritative evidence.
-    """
-    text = (raw or "").strip()
-    if not text:
-        return ""
-    try:
-        payload = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-
-    def parse_decimal(value):
-        if isinstance(value, bool) or value is None:
-            raise ValueError("invalid numeric value")
-        text = str(value).strip().replace(",", "")
-        if text.endswith("%"):
-            return Decimal(text[:-1]) / Decimal("100")
-        return Decimal(text)
-
-    values = {}
-    rendered = []
-    for item in payload.get("facts", []):
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name")
-        value = item.get("value")
-        if not isinstance(name, str) or not name.strip():
-            continue
-        try:
-            parsed = parse_decimal(value)
-        except (InvalidOperation, ValueError, TypeError):
-            continue
-        if not parsed.is_finite():
-            continue
-        key = name.strip()
-        values[key] = parsed
-        unit = item.get("unit") or ""
-        rendered.append(f"- fact {key} = {parsed}{unit}")
-
-    operations = {"add", "subtract", "multiply", "divide"}
-    pending = [item for item in payload.get("derived", []) if isinstance(item, dict)]
-    while pending:
-        progressed = False
-        remaining = []
-        for item in pending:
-            name = item.get("name")
-            operation = item.get("operation")
-            operands = item.get("operands")
-            reported = item.get("value")
-            if (
-                not isinstance(name, str)
-                or not name.strip()
-                or operation not in operations
-                or not isinstance(operands, list)
-                or not operands
-            ):
-                continue
-            if operation in {"subtract", "divide"} and len(operands) != 2:
-                continue
-            try:
-                operand_values = [
-                    values[ref] if isinstance(ref, str) and ref in values else parse_decimal(ref)
-                    for ref in operands
-                ]
-                if operation == "add":
-                    computed = sum(operand_values, Decimal("0"))
-                elif operation == "subtract":
-                    computed = operand_values[0] - operand_values[1]
-                elif operation == "multiply":
-                    computed = Decimal("1")
-                    for value in operand_values:
-                        computed *= value
-                else:
-                    if operand_values[1] == 0:
-                        continue
-                    computed = operand_values[0] / operand_values[1]
-                reported_decimal = parse_decimal(reported)
-            except (InvalidOperation, ValueError, TypeError, ZeroDivisionError):
-                remaining.append(item)
-                continue
-            if not reported_decimal.is_finite() or reported_decimal != computed:
-                continue
-            key = name.strip()
-            values[key] = computed
-            unit = item.get("unit") or ""
-            rendered.append(
-                f"- derived {key} = {computed}{unit} "
-                f"({operation}: {', '.join(str(ref) for ref in operands)})"
-            )
-            progressed = True
-        if not progressed:
-            break
-        pending = remaining
-
-    return "\n".join(rendered)
 
 
 def _detect_anchors(question: str) -> List[str]:
@@ -234,42 +77,7 @@ def _needs_claim_check(question: str, options: Sequence[str]) -> bool:
     return bool(_CLAIM_RELATION.search(text))
 
 
-def _majority_vote(answers: Sequence[str], qtype: str, num_options: int) -> str:
-    """Aggregate independent answer samples into one answer.
 
-    Voting happens per LETTER, not on the whole answer string. That distinction
-    is what makes this useful for multi-select: a spurious letter the model only
-    emits in a minority of samples is dropped, while a letter it consistently
-    supports survives. Whole-string voting could not separate the two, because
-    "AB" and "ABD" are simply different strings.
-
-    Single-answer formats take the most frequent letter. Ill-formed samples are
-    ignored; if every sample is ill-formed the first one is returned unchanged so
-    the caller's existing canonicality retry still applies.
-    """
-    valid = [a for a in answers if _is_canonical_answer(a, qtype, num_options)]
-    if not valid:
-        return answers[0] if answers else ""
-
-    if qtype in ("mcq", "tf"):
-        return Counter(valid).most_common(1)[0][0]
-
-    # multi: keep a letter only when a strict majority of samples carries it.
-    threshold = len(valid) / 2
-    letter_votes = Counter(letter for answer in valid for letter in set(answer))
-    kept = sorted(letter for letter, votes in letter_votes.items() if votes > threshold)
-    if kept:
-        return "".join(kept)
-    # Nothing reached a majority (e.g. two samples disagreeing completely) --
-    # fall back to the most frequent complete answer rather than inventing one.
-    return Counter(valid).most_common(1)[0][0]
-
-
-def _needs_calculation_judgement(question: str, options: Sequence[str]) -> bool:
-    """Use a second Qwen pass only when the question explicitly requires math."""
-    # Do not trigger merely because a distractor contains a percentage, amount,
-    # or per-share figure.  The stem must itself ask for a computation/order.
-    return bool(_CALCULATION_MARKER.search(str(question)))
 
 
 _SYSTEM_PROMPT = (
@@ -286,65 +94,7 @@ _STRUCTURED_SYSTEM_PROMPT = (
 )
 
 
-def _parse_structured_answer(raw: str, qtype: str, num_options: int) -> str:
-    """Parse one-call option states, with a safe fallback for nonconforming output."""
-    text = raw or ""
-    state_pairs = []
-    for line in text.splitlines():
-        match = _OPTION_RELATION_STATE.search(line) or _OPTION_STATE.search(line)
-        if match:
-            state_pairs.append((match.group(1), match.group(2)))
-    states = {
-        label.upper(): state.upper()
-        for label, state in state_pairs
-        if ord("A") <= ord(label.upper()) < ord("A") + max(1, num_options)
-    }
-    if states:
-        supported = "".join(
-            label for label in sorted(states) if states[label] == "SUPPORTED"
-        )
-        if qtype == "multi":
-            return supported
-        if supported:
-            return supported[0]
-    answer_line = _ANSWER_LINE.search(text)
-    if answer_line:
-        return parse_answer(answer_line.group(1), qtype, num_options=num_options)
-    return parse_answer(text, qtype, num_options=num_options)
 
-
-def _is_canonical_answer(answer: str, qtype: str, num_options: int) -> bool:
-    allowed = {chr(ord("A") + i) for i in range(max(1, num_options))}
-    if qtype in {"mcq", "tf"}:
-        return answer in allowed and (qtype != "tf" or answer in {"A", "B"})
-    return bool(answer) and set(answer) <= allowed and answer == "".join(sorted(set(answer)))
-
-
-def _merge_evidence_blocks(contexts: Sequence[str], max_chars: int) -> str:
-    """Deduplicate source blocks and enforce one final context budget."""
-    if max_chars <= 0:
-        return ""
-    blocks: List[str] = []
-    seen = set()
-    used = 0
-    for context in contexts:
-        for block in (part.strip() for part in (context or "").split("\n\n")):
-            if not block:
-                continue
-            key = re.sub(r"\s+", " ", block).strip().lower()
-            if key in seen:
-                continue
-            separator = 2 if blocks else 0
-            remaining = max_chars - used - separator
-            if remaining <= 0:
-                return "\n\n".join(blocks)
-            seen.add(key)
-            selected = block[:remaining]
-            blocks.append(selected)
-            used += separator + len(selected)
-            if len(selected) < len(block):
-                return "\n\n".join(blocks)
-    return "\n\n".join(blocks)
 
 
 @dataclass
