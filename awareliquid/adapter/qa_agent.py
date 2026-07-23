@@ -1049,10 +1049,17 @@ class MemoryQAAgent:
             + f"Question: {question}\nOptions:\n{opt_lines}\n\n"
             "Evaluate every option independently using only direct evidence in Context. "
             "Do not infer a positive claim from silence or from a related product. "
+            "An explicit negation or exclusion in Context (e.g. 不属于, 不免责, 不承担, 除外, "
+            "不适用, 免收, does not, is not, excluded) REFUTES the matching option. "
+            "For a sameness or equality claim (相同, 相等, 一致, the same, equal), mark SUPPORTED "
+            "only when the compared values are explicitly equal; if they differ, REFUTE. "
+            "Mark an option SUPPORTED only when Context contains an explicit statement that "
+            "entails its complete claim; when the supporting evidence is weak, partial, or "
+            "absent, mark INSUFFICIENT and exclude it rather than guessing. "
             + relation
             + "Output exactly one line per option in the form LETTER=STATE, where STATE is "
             "SUPPORTED, REFUTED, or INSUFFICIENT, followed by one final line ANSWER:LETTERS. "
-            "Include only SUPPORTED letters in ANSWER, sorted; exclude INSUFFICIENT. "
+            "Include only SUPPORTED letters in ANSWER, sorted; exclude INSUFFICIENT and REFUTED. "
             "Do not explain."
         )
 
@@ -1072,10 +1079,14 @@ class MemoryQAAgent:
             '"derived":[{"name":"result name","operation":"add",'
             '"operands":["fact name"],"value":"12.5","unit":"万元"}]}.'
             "Extract only numerical inputs explicitly stated in the question and "
-            "formulas or rates explicitly stated in Context. Use only add, subtract, "
-            "multiply, or divide. Do not use numbers from answer options as inputs, "
-            "do not invent fees or rates, and do not include a derived value unless "
-            "its operands are present in facts."
+            "formulas or rates explicitly stated in Context. Before deriving the result, "
+            "include EVERY rate, fee, deduction, adjustment, or exception stated in Context "
+            "that applies to this specific scenario — for example a surrender or handling fee, "
+            "a year-tiered rate, or a waiting-period rule keyed to the stated policy year. A "
+            "derived value that omits an applicable fee or adjustment is wrong. Use only add, "
+            "subtract, multiply, or divide. Do not use numbers from answer options as inputs, "
+            "do not invent fees or rates that Context does not state, and do not include a "
+            "derived value unless its operands are present in facts."
         )
 
     @staticmethod
