@@ -86,11 +86,31 @@ This matters more than a feature list:
   It reports accuracy overall, by question type and by answer format, plus token
   cost and the resulting score.
 
-**NOT validated**
-- **No accuracy number has been recorded yet.** The harness is built and proven,
-  but a real model run has not been performed here, so this README states no
-  accuracy figure. Any such claim would be fabrication until `run_eval.py` is run
-  against a real model.
+**Measured** (real Qwen runs on the bundled eval set, 22 questions)
+
+| configuration | accuracy | tokens |
+|---------------|---------:|-------:|
+| single sample | 19/22 (86.4%) | ~90k |
+| `--self-consistency 3` | **20/22 (90.9%)** | ~207k |
+
+Per type at 3-sample voting: fact lookup 8/8, clause location 5/5,
+cross-document comparison 2/2, calculation 4/4, multi-document reasoning 1/3.
+Per format: mcq 13/13, tf 4/4, **multi 3/5**.
+
+**Known limits, with evidence**
+- **The provider is non-deterministic even at `temperature=0`** (MoE routing /
+  server batching). A previously-correct answer flipped on an identical re-run.
+  Accuracy is therefore a distribution, not a point — which is why
+  `self_consistency` exists, and why single-run A/B at n=22 cannot resolve small
+  changes.
+- **Multi-select is the weak spot**, and voting cannot rescue all of it. Probing
+  the per-sample votes on one failure showed the correct option receiving **0/3**
+  votes and an incorrect one **3/3** — a stable model reasoning error on
+  cross-document negation ("X is excluded" vs "X is *not* excluded"), not noise.
+  No vote threshold can fix a letter that never gets a vote.
+- Vote counts themselves are unstable at 3 samples (the same option scored 3/3 in
+  one probe and ≤1/3 in another), so tuning the voting threshold on this set
+  would be fitting noise. More samples, or a larger eval set, is the honest fix.
 - The eval set was authored alongside the system, so it measures the *pipeline*
   (does retrieval find the passage, does compression keep the answer sentence,
   does parsing return the right letter) — **not** real-world difficulty. It is a

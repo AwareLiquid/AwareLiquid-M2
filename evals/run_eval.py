@@ -56,6 +56,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Score the adapter on the labelled eval set.")
     ap.add_argument("--limit", type=int, default=0, help="only the first N questions")
     ap.add_argument("--show-errors", action="store_true", help="print every wrong answer")
+    ap.add_argument("--self-consistency", type=int, default=1,
+                    help="independent answer samples aggregated by majority vote (1=off)")
     args = ap.parse_args()
 
     corpus = load_corpus()
@@ -67,8 +69,13 @@ def main() -> int:
     print(f"corpus: {len(corpus)} documents | questions: {len(questions)}")
     print(f"backend: {'MOCK (answers meaningless)' if mock else 'REAL model'}\n")
 
+    if args.self_consistency > 1:
+        print(f"self-consistency: {args.self_consistency} samples per question, majority vote\n")
     agent = MemoryQAAgent(
-        config=RetrievalConfig(retrieval_backend="lexical"),
+        config=RetrievalConfig(
+            retrieval_backend="lexical",
+            self_consistency=args.self_consistency,
+        ),
         chat_client=MockChatClient() if mock else None,
     )
     agent.ingest_documents(corpus)

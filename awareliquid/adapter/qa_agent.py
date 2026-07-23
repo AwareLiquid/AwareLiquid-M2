@@ -15,6 +15,7 @@ short answer.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import json
@@ -233,6 +234,37 @@ def _needs_claim_check(question: str, options: Sequence[str]) -> bool:
     return bool(_CLAIM_RELATION.search(text))
 
 
+def _majority_vote(answers: Sequence[str], qtype: str, num_options: int) -> str:
+    """Aggregate independent answer samples into one answer.
+
+    Voting happens per LETTER, not on the whole answer string. That distinction
+    is what makes this useful for multi-select: a spurious letter the model only
+    emits in a minority of samples is dropped, while a letter it consistently
+    supports survives. Whole-string voting could not separate the two, because
+    "AB" and "ABD" are simply different strings.
+
+    Single-answer formats take the most frequent letter. Ill-formed samples are
+    ignored; if every sample is ill-formed the first one is returned unchanged so
+    the caller's existing canonicality retry still applies.
+    """
+    valid = [a for a in answers if _is_canonical_answer(a, qtype, num_options)]
+    if not valid:
+        return answers[0] if answers else ""
+
+    if qtype in ("mcq", "tf"):
+        return Counter(valid).most_common(1)[0][0]
+
+    # multi: keep a letter only when a strict majority of samples carries it.
+    threshold = len(valid) / 2
+    letter_votes = Counter(letter for answer in valid for letter in set(answer))
+    kept = sorted(letter for letter, votes in letter_votes.items() if votes > threshold)
+    if kept:
+        return "".join(kept)
+    # Nothing reached a majority (e.g. two samples disagreeing completely) --
+    # fall back to the most frequent complete answer rather than inventing one.
+    return Counter(valid).most_common(1)[0][0]
+
+
 def _needs_calculation_judgement(question: str, options: Sequence[str]) -> bool:
     """Use a second Qwen pass only when the question explicitly requires math."""
     # Do not trigger merely because a distractor contains a percentage, amount,
@@ -348,6 +380,11 @@ class RetrievalConfig:
     multi_option_audit: bool = True  # independently check every option on multi-choice
     structured_judgement: bool = True
     structured_judgement_max_tokens: int = 256
+    # Independent answer samples aggregated by per-letter majority vote. 1 = off.
+    # The provider is non-deterministic even at temperature 0, so a single sample
+    # carries real variance; >1 trades tokens for a more stable answer.
+    self_consistency: int = 1
+    self_consistency_temperature: float = 0.0
     calculation_judgement: bool = True
     calculation_judgement_max_tokens: int = 512
     option_evidence_budget: int = 900
@@ -850,29 +887,50 @@ class MemoryQAAgent:
                 question, options, qtype, context, audit_text=audit_text
             )
         )
-        result: ChatResult = self.chat_client.chat(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        _STRUCTURED_SYSTEM_PROMPT
-                        if self.config.structured_judgement
-                        else _SYSTEM_PROMPT
-                    ),
-                },
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.0,
-            max_tokens=(
-                self.config.structured_judgement_max_tokens
-                if self.config.structured_judgement
-                else self.config.max_answer_tokens
-            ),
-        )
-        answer = (
-            _parse_structured_answer(result.text, qtype, len(options) or 4)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    _STRUCTURED_SYSTEM_PROMPT
+                    if self.config.structured_judgement
+                    else _SYSTEM_PROMPT
+                ),
+            },
+            {"role": "user", "content": user_prompt},
+        ]
+        answer_max_tokens = (
+            self.config.structured_judgement_max_tokens
             if self.config.structured_judgement
-            else parse_answer(result.text, qtype, num_options=len(options) or 4)
+            else self.config.max_answer_tokens
+        )
+        # Self-consistency: draw N independent samples and aggregate them. The
+        # provider is not deterministic even at temperature 0 (MoE routing and
+        # server-side batching), so a single sample carries real variance; voting
+        # over several samples reports the answer the model actually favours
+        # rather than whichever one this particular call happened to produce.
+        samples = max(1, int(self.config.self_consistency))
+        sampled_answers: List[str] = []
+        first_text = ""
+        total_usage = TokenUsage()
+        for index in range(samples):
+            sample: ChatResult = self.chat_client.chat(
+                messages=messages,
+                temperature=self.config.self_consistency_temperature if samples > 1 else 0.0,
+                max_tokens=answer_max_tokens,
+            )
+            total_usage = total_usage + sample.usage
+            if index == 0:
+                first_text = sample.text
+            sampled_answers.append(
+                _parse_structured_answer(sample.text, qtype, len(options) or 4)
+                if self.config.structured_judgement
+                else parse_answer(sample.text, qtype, num_options=len(options) or 4)
+            )
+        result = ChatResult(text=first_text, usage=total_usage)
+        answer = (
+            sampled_answers[0]
+            if samples == 1
+            else _majority_vote(sampled_answers, qtype, len(options) or 4)
         )
         # A provider can occasionally return an empty or non-canonical boolean
         # despite the structured prompt.  Retry the format conversion once
