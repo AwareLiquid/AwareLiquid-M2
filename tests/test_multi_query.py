@@ -28,7 +28,7 @@ def test_detect_anchors_dedupes():
 def _agent(multi_query: bool, top_k: int = 2) -> MemoryQAAgent:
     enc = FakeEncoder(dim=64)
     store = PersistentKnowledgeMemory(key_dim=enc.dim, db_path=":memory:")
-    cfg = RetrievalConfig(max_chars=26, overlap_chars=0, top_k=top_k,
+    cfg = RetrievalConfig(retrieval_backend="hybrid", max_chars=26, overlap_chars=0, top_k=top_k,
                           multi_query=multi_query, multi_query_cap=6)
     return MemoryQAAgent(encoder=enc, store=store, chat_client=MockChatClient(), config=cfg)
 

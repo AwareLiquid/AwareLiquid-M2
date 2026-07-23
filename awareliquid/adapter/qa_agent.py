@@ -99,10 +99,12 @@ _STRUCTURED_SYSTEM_PROMPT = (
 
 @dataclass
 class RetrievalConfig:
-    # ``hybrid`` preserves the original research path. ``lexical`` is the
-    # dependency-light path used for local/offline testing; it needs no encoder
-    # download and no GPU.
-    retrieval_backend: str = "hybrid"  # "hybrid" | "lexical"
+    # ``lexical`` is the default and the only path any entry point uses: pure
+    # SQLite BM25, no embedding model, no download, no GPU. ``hybrid`` keeps the
+    # dense/e5 + RRF research path available for comparison, but it is opt-in --
+    # it pulls in torch/transformers and is unsuitable wherever embedding models
+    # are disallowed, which is the setting this adapter is built for.
+    retrieval_backend: str = "lexical"  # "lexical" | "hybrid" (research only)
     competition_mode: bool = False      # opt-in future API validation only
     token_budget: int = 5_000_000
     usage_ledger_path: Optional[str] = None

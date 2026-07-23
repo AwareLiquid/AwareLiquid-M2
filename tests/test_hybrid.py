@@ -75,7 +75,7 @@ def test_rrf_agreement_beats_single_channel():
 def _agent(hybrid: bool) -> MemoryQAAgent:
     enc = FakeEncoder(dim=64)
     store = PersistentKnowledgeMemory(key_dim=enc.dim, db_path=":memory:")
-    cfg = RetrievalConfig(max_chars=60, overlap_chars=10, top_k=3, hybrid=hybrid)
+    cfg = RetrievalConfig(retrieval_backend="hybrid", max_chars=60, overlap_chars=10, top_k=3, hybrid=hybrid)
     return MemoryQAAgent(encoder=enc, store=store, chat_client=MockChatClient(), config=cfg)
 
 

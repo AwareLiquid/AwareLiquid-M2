@@ -54,9 +54,12 @@ It was built under three hard constraints that shape every design decision:
 | **Account** | `adapter/qwen_client.py` | OpenAI-compatible client with exact per-call token accounting and a persistent budget ledger. |
 | **Submit** | `submit.py` | Batch runner: contract-validated CSV output, atomic per-question checkpoints, resumable. |
 
-The dense/hybrid path (e5 embeddings + RRF fusion in `memory/knowledge_store.py`
-and `adapter/hybrid.py`) is kept for research comparison but is **not** part of
-the default answer path.
+`retrieval_backend` defaults to `"lexical"` — no embedding model, no download,
+no GPU. The dense/hybrid path (e5 embeddings + RRF fusion in
+`memory/knowledge_store.py` and `adapter/hybrid.py`) is preserved for research
+comparison and must be requested explicitly with
+`RetrievalConfig(retrieval_backend="hybrid")`; it pulls in `torch`/`transformers`
+and is unusable wherever embedding models are disallowed.
 
 ## Honest status — what is and isn't validated
 

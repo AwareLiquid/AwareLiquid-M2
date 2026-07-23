@@ -36,18 +36,16 @@ def _agent() -> MemoryQAAgent:
         encoder=enc,
         store=store,
         chat_client=MockChatClient(),
-        config=RetrievalConfig(max_chars=60, overlap_chars=10, top_k=3),
+        config=RetrievalConfig(retrieval_backend="hybrid", max_chars=60, overlap_chars=10, top_k=3),
     )
 
 
 @pytest.mark.parametrize("chat_client", [MockChatClient(), object()])
 def test_formal_agent_rejects_mock_or_arbitrary_injected_client(chat_client):
-    enc = FakeEncoder(dim=128)
-    store = PersistentKnowledgeMemory(key_dim=enc.dim, db_path=":memory:")
+    # Formal mode runs on the lexical backend, so no encoder is involved here;
+    # this test is purely about which chat client is accepted.
     with pytest.raises(RuntimeError, match="requires a validated formal QwenChatClient"):
         MemoryQAAgent(
-            encoder=enc,
-            store=store,
             chat_client=chat_client,
             config=RetrievalConfig(competition_mode=True),
         )
@@ -55,8 +53,6 @@ def test_formal_agent_rejects_mock_or_arbitrary_injected_client(chat_client):
 
 def test_formal_agent_requires_exact_configured_budget(tmp_path):
     ledger_path = str(tmp_path / "usage.json")
-    enc = FakeEncoder(dim=128)
-    store = PersistentKnowledgeMemory(key_dim=enc.dim, db_path=":memory:")
     client = QwenChatClient(
         api_key="test-key",
         competition_mode=True,
@@ -66,8 +62,6 @@ def test_formal_agent_requires_exact_configured_budget(tmp_path):
     )
     with pytest.raises(ValueError, match="token_budget=5000000"):
         MemoryQAAgent(
-            encoder=enc,
-            store=store,
             chat_client=client,
             config=RetrievalConfig(
                 competition_mode=True,
@@ -287,7 +281,7 @@ def test_calculation_judgement_is_targeted_and_usage_is_counted():
         encoder=FakeEncoder(dim=128),
         store=PersistentKnowledgeMemory(key_dim=128, db_path=":memory:"),
         chat_client=client,
-        config=RetrievalConfig(max_chars=60, overlap_chars=10, top_k=3),
+        config=RetrievalConfig(retrieval_backend="hybrid", max_chars=60, overlap_chars=10, top_k=3),
     )
     agent.ingest_document("annual", "现金价值为 12 万元，手续费比例为 0%。")
     calculated = agent.answer_question(
@@ -319,3 +313,17 @@ def test_b_answer_uses_same_answer_path_without_doc_ids():
     )
     assert result.answer == "A"
     assert len(client.prompts) == 1
+
+
+def test_default_backend_is_lexical_and_needs_no_embedding_model():
+    """The advertised default must match what every entry point actually uses.
+
+    A "hybrid" default silently pulled in the dense/e5 path — and therefore
+    torch, a model download, and a dependency that is unusable wherever
+    embedding models are disallowed — for anyone who just called
+    MemoryQAAgent().
+    """
+    assert RetrievalConfig().retrieval_backend == "lexical"
+    agent = MemoryQAAgent(chat_client=MockChatClient())
+    assert agent.encoder is None, "the default path must not construct an encoder"
+    assert hasattr(agent.store, "search_bm25")
