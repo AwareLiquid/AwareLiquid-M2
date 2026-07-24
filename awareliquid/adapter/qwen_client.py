@@ -21,11 +21,13 @@ falls back to a mock client or a different transport.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
 import tempfile
 import threading
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -359,7 +361,8 @@ class QwenChatClient:
         model: str = DEFAULT_MODEL,
         provider: str = DEFAULT_PROVIDER,
         timeout: float = 60.0,
-        max_retries: int = 2,
+        max_retries: int = 4,
+        retry_backoff: float = 1.0,
         competition_mode: bool = False,
         token_budget: int = DEFAULT_TOKEN_BUDGET,
         usage_ledger: Optional[UsageLedger] = None,
@@ -375,6 +378,7 @@ class QwenChatClient:
         self.provider = provider
         self.timeout = float(timeout)
         self.max_retries = int(max_retries)
+        self.retry_backoff = float(retry_backoff)
         self.competition_mode = bool(competition_mode)
         self.formal_run_id = formal_run_id
         self.formal_ledger_path = (
@@ -487,8 +491,17 @@ class QwenChatClient:
                 # 4xx is a caller error (bad key/model) -- do not retry.
                 if 400 <= exc.code < 500:
                     break
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            except (urllib.error.URLError, TimeoutError, ssl.SSLError,
+                    http.client.HTTPException, ConnectionError,
+                    json.JSONDecodeError) as exc:
+                # Transient transport failure: timeout, SSL handshake, a dropped
+                # or reset connection (RemoteDisconnected is an HTTPException),
+                # or a truncated body. Back off before retrying so several retries
+                # do not all land inside the same brief network blip -- without
+                # this, one flaky moment aborts an entire multi-question run.
                 last_err = exc
+                if attempt < self.max_retries:
+                    time.sleep(min(self.retry_backoff * (2 ** attempt), 10.0))
             except Exception:
                 # Response validation errors must not strand a reservation.
                 # They are not transport failures and should not be retried

@@ -343,3 +343,45 @@ def test_billed_usage_is_recorded_even_when_the_response_is_rejected(tmp_path, m
         "max_tokens": 5_000_000,
         "used_tokens": 5,
     }
+
+
+def test_transient_disconnect_is_retried_then_succeeds(tmp_path, monkeypatch):
+    """A dropped connection on early attempts must not abort the call.
+
+    Regression for a real outage: a RemoteDisconnected on question 1 aborted an
+    entire multi-question run because the retry loop did not treat it as
+    transient. It now retries (with backoff) and succeeds when the network
+    recovers.
+    """
+    import http.client
+
+    calls = {"n": 0}
+    sleeps = []
+    monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+
+    def flaky_urlopen(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise http.client.RemoteDisconnected("Remote end closed connection")
+        return _Response(_response())
+
+    monkeypatch.setattr("urllib.request.urlopen", flaky_urlopen)
+    client = QwenChatClient(api_key="test-key", retry_backoff=0.0)
+    res = client.chat([{"role": "user", "content": "hi"}], max_tokens=4)
+
+    assert res.text == "A"
+    assert calls["n"] == 3          # failed twice, succeeded on the third
+    assert len(sleeps) == 2         # backed off before each retry
+
+
+def test_retry_gives_up_after_max_retries(monkeypatch):
+    import http.client
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_a, **_k: (_ for _ in ()).throw(http.client.RemoteDisconnected("x")),
+    )
+    client = QwenChatClient(api_key="test-key", max_retries=2, retry_backoff=0.0)
+    with pytest.raises(RuntimeError, match="failed after 3 attempts"):
+        client.chat([{"role": "user", "content": "hi"}], max_tokens=4)
