@@ -89,16 +89,26 @@ This matters more than a feature list:
   It reports accuracy overall, by question type and by answer format, plus token
   cost and the resulting score.
 
-**Measured** (real Qwen runs on the bundled eval set, 22 questions)
+**Measured** (real Qwen runs on the bundled eval set, `--self-consistency 3`)
 
-| configuration | accuracy | tokens |
-|---------------|---------:|-------:|
-| single sample | 19/22 (86.4%) | ~90k |
-| `--self-consistency 3` | **20/22 (90.9%)** | ~207k |
+| eval set | accuracy | tokens |
+|----------|---------:|-------:|
+| 22 questions, 3 domains | 20/22 (90.9%) | ~207k |
+| **48 questions, all 5 domains** | **44/48 (91.7%)** | ~377k |
 
-Per type at 3-sample voting: fact lookup 8/8, clause location 5/5,
-cross-document comparison 2/2, calculation 4/4, multi-document reasoning 1/3.
-Per format: mcq 13/13, tf 4/4, **multi 3/5**.
+The 48-question set spans all five financial-document domains (insurance,
+regulatory, financial contracts, financial reports, research) and adds the
+question types the smaller set never exercised — statutory time limits, scope
+exceptions, and opinion-vs-fact discrimination. Per type on it: fact lookup
+18/19, clause location 6/6, time limits 2/2, scope 3/3, opinion-vs-fact 2/2,
+cross-document comparison 4/4, calculation 6/7, **multi-document reasoning 3/5**.
+Per format: mcq 26/28, tf 10/10, **multi 8/10**.
+
+Widening the set from 22 to 48 halved the per-question weight (4.5% → 2.1%), so
+this number is more trustworthy than any single run on the smaller set — and it
+did not drop, which located the weak spot precisely: of the 4 misses, 3 are
+multi-select and 1 is a deliberately-planted calculation distractor. Retrieval,
+compression, parsing, and the two new domains are not the bottleneck.
 
 **Known limits, with evidence**
 - **The provider is non-deterministic even at `temperature=0`** (MoE routing /
